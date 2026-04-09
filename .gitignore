@@ -1,0 +1,78 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Sample data (530MB — download via download_sample_data.py) ───────────────
+backend/data/sample-inputs/*
+!backend/data/sample-inputs/.gitkeep
+data/sample-inputs/
+
+# ── Runtime outputs and uploads ───────────────────────────────────────────────
+backend/data/outputs/*
+!backend/data/outputs/.gitkeep
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+data/outputs/
+data/uploads/
+
+# ── MCP server runtime data ───────────────────────────────────────────────────
+mcp-servers/invest-mcp/data/
+mcp-servers/qgis-mcp/data/
+
+# ── Runtime output directories (all model run outputs) ───────────────────────
+backend/output/
+backend/outputs/
+backend/data/output/
+backend/data/results/
+
+# ── Geospatial files (outputs only, not source) ───────────────────────────────
+backend/*.tif
+backend/*.shp
+backend/*.shx
+backend/*.dbf
+backend/*.prj
+backend/*.cpg
+backend/*.gpkg
+backend/*.png
+backend/intermediate/
+backend/taskgraph_cache/
+backend/optional_workspace_directory/
+backend/path_to_your_workspace_directory/
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# ── Test / coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Generated artefacts ───────────────────────────────────────────────────────
+*.pptx
+generate_slides.py
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log

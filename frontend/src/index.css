@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f1117;
+  color: #e2e8f0;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+/* Markdown prose */
+.prose p { margin: 0.4rem 0; }
+.prose ul { margin: 0.4rem 0; padding-left: 1.25rem; }
+.prose li { margin: 0.2rem 0; }
+.prose code {
+  background: #1e293b;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.85em;
+  font-family: ui-monospace, monospace;
+}
+.prose pre {
+  background: #1e293b;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+.prose pre code {
+  background: none;
+  padding: 0;
+}
+.prose h1, .prose h2, .prose h3 {
+  font-weight: 600;
+  margin: 0.5rem 0 0.25rem;
+}
