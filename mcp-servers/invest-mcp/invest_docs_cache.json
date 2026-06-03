@@ -1,0 +1,472 @@
+{
+  "run_annual_water_yield": {
+    "description": "Annual Water Yield: Reservoir Hydropower Production. Executes the hydropower/annual water yield model",
+    "params": {
+      "workspace_dir": "A path to the directory that will write output and other temporary files during calculation. (required)",
+      "lulc_path": "A path to a land use/land cover raster whose LULC indexes correspond to indexes in the biophysical table input. Used for determining soil retention and other biophysical properties of the landscape. (required)",
+      "depth_to_root_rest_layer_path": "A path to an input raster describing the depth of “good” soil before reaching this restrictive layer (required)",
+      "precipitation_path": "A path to an input raster describing the average annual precipitation value for each cell (mm) (required)",
+      "pawc_path": "A path to an input raster describing the plant available water content value for each cell. Plant Available Water Content fraction (PAWC) is the fraction of water that can be stored in the soil profile that is available for plants’ use. PAWC is a fraction from 0 to 1 (required)",
+      "eto_path": "A path to an input raster describing the annual average evapotranspiration value for each cell. Potential evapotranspiration is the potential loss of water from soil by both evaporation from the soil and transpiration by healthy Alfalfa (or grass) if sufficient water is available (mm) (required)",
+      "watersheds_path": "A path to an input shapefile of the watersheds of interest as polygons. (required)",
+      "sub_watersheds_path": "A path to an input shapefile of the subwatersheds of interest that are contained in the args['watersheds_path'] shape provided as input. (optional)",
+      "biophysical_table_path": "A path to an input CSV table of land use/land cover classes, containing data on biophysical coefficients such as root_depth (mm) and Kc, which are required. A column with header LULC_veg is also required which should have values of 1 or 0, 1 indicating a land cover type of vegetation, a 0 indicating non vegetation or wetland, water. NOTE: these data are attributes of each LULC class rather than attributes of individual cells in the raster map (required)",
+      "seasonality_constant": "Floating point value between 1 and 30 corresponding to the seasonal distribution of precipitation (required)",
+      "results_suffix": "A string that will be concatenated onto the end of file names (optional)",
+      "demand_table_path": "If a non-empty string, a path to an input CSV table of LULC classes, showing consumptive water use for each landuse / land-cover type (cubic meters per year) to calculate water scarcity. Required if valuation_table_path is provided.",
+      "valuation_table_path": "If a non-empty string, a path to an input CSV table of hydropower stations with the following fields to calculate valuation: ‘ws_id’, ‘time_span’, ‘discount’, ‘efficiency’, ‘fraction’, ‘cost’, ‘height’, ‘kw_price’",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_carbon_storage": {
+    "description": "Calculate the amount of carbon stocks given a landscape, or the difference due to some change, and calculate economic valuation on those scenarios. The model can operate on a single scenario or a combined baseline and alternate scenario.",
+    "params": {
+      "workspace_dir": "A path to the directory that will write output and other temporary files during calculation.",
+      "results_suffix": "Appended to any output file name.",
+      "lulc_bas_path": "A path to a raster representing the baseline carbon stocks.",
+      "calc_sequestration": "If true, sequestration should be calculated and ‘lulc_alt_path’ should be defined.",
+      "lulc_alt_path": "A path to a raster representing alternate landcover scenario. Optional, but if present and well defined will trigger a sequestration calculation.",
+      "carbon_pools_path": "Path to CSV or that indexes carbon storage density to lulc codes. (required if ‘do_uncertainty’ is false)",
+      "lulc_bas_year": "An integer representing the year of args[‘lulc_bas_path’] used if args[‘do_valuation’] is True.",
+      "lulc_alt_year": "An integer representing the year of args[‘lulc_alt_path’] used in valuation if it exists. Required if args[‘do_valuation’] is True and args[‘lulc_alt_path’] is present and well defined.",
+      "do_valuation": "If true then run the valuation model on available outputs. Calculate NPV for an alternate scenario and report in final HTML document.",
+      "price_per_metric_ton_of_c": "Is the present value of carbon per metric ton. Used if args[‘do_valuation’] is present and True.",
+      "discount_rate": "Discount rate used if NPV calculations are required. Used if args[‘do_valuation’] is present and True.",
+      "rate_change": "Annual rate of change in price of carbon as a percentage. Used if args[‘do_valuation’] is present and True.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_coastal_blue_carbon": {
+    "description": "",
+    "params": {
+      "workspace_dir": "The path to a workspace directory where outputs should be written.",
+      "results_suffix": "If provided, a string suffix that will be added to each output filename.",
+      "n_workers": "If provided, the number of workers to pass to taskgraph .",
+      "landcover_snapshot_csv": "The path to a transitions CSV table containing transition years and the LULC rasters representing that year. Required for transition analysis.",
+      "analysis_year": "The year of the final analysis.",
+      "do_economic_analysis": "Whether to do valuation.",
+      "use_price_table": "Whether to use a table of annual carbon prices for valuation. Defaults to False .",
+      "price_table_path": "The path to a table of prices to use for valuation. Required if args['use_price_table'] is True .",
+      "inflation_rate": "The rate of inflation. The number provided is multiplied by 0.01 to compute the actual rate of inflation. Required if args['use_price_table'] is False .",
+      "price": "The carbon price. Required if args['use_price_table'] is False .",
+      "discount_rate": "The discount rate. The number provided is multiplied by 0.01 to compute the actual discount rate. Required if args['do_economic_analysis'] .",
+      "biophysical_table_path": "The path to the biophysical table on disk. This table has many required columns. See MODEL_SPEC for the required columns.",
+      "landcover_transitions_table": "The path to the landcover transitions table, indicating the behavior of carbon when the landscape undergoes a transition."
+    }
+  },
+  "run_coastal_blue_carbon_preprocessor": {
+    "description": "Coastal Blue Carbon Preprocessor. The preprocessor accepts a list of rasters and checks for cell-transitions across the rasters. The preprocessor outputs a CSV file representing a matrix of land cover transitions, each cell pre-filled with a string indicating whether carbon accumulates or is disturbed as a result of the transition, if a transition occurs.",
+    "params": {
+      "workspace_dir": "Directory path to workspace",
+      "results_suffix": "Append to outputs directory name if provided",
+      "lulc_lookup_table_path": "Filepath of lulc lookup table",
+      "landcover_csv_path": "Filepath to a CSV containing the year and filepath to snapshot rasters on disk. The years may be in any order, but must be unique."
+    }
+  },
+  "run_crop_production_percentile": {
+    "description": "This model will take a landcover (crop cover?) map and produce yields, production, and observed crop yields, a nutrient table, and a clipped observed map.",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files",
+      "results_suffix": "String to append to any output file names",
+      "landcover_raster_path": "Path to landcover raster",
+      "landcover_to_crop_table_path": "Path to a table that converts landcover types to crop names that has two headers: lucode: integer value corresponding to a landcover code in args[‘landcover_raster_path’] . crop_name: a string that must match one of the crops in CROP_OPTIONS. A ValueError is raised if no corresponding climate bin raster path is found in the Climate Bin Raster Table.",
+      "aggregate_polygon_path": "Path to polygon shapefile that will be used to aggregate crop yields and total nutrient value. (optional, if value is None, then skipped)",
+      "percentile_yield_csv_table": "Path to a table that maps each crop name to a path to its corresponding percentile yield table.",
+      "climate_bin_raster_table": "Path to a table that maps each crop name to a path to its corresponding climate bin raster.",
+      "observed_yield_raster_table": "Path to a table that maps each crop name to a path to its corresponding observed yield raster.",
+      "crop_nutrient_table": "Path to a table that lists amounts of nutrients in each crop.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_crop_production_regression": {
+    "description": "This model will take a landcover (crop cover?), N, P, and K map and produce modeled yields, and a nutrient table.",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files",
+      "results_suffix": "String to append to any output file names",
+      "landcover_raster_path": "Path to landcover raster",
+      "landcover_to_crop_table_path": "Path to a table that converts landcover types to crop names that has two headers: lucode: integer value corresponding to a landcover code in args[‘landcover_raster_path’] . crop_name: a string that must match one of the crops in CROP_OPTIONS. A ValueError is raised if no corresponding climate bin raster path is found in the Climate Bin Raster Table.",
+      "fertilization_rate_table_path": "Path to CSV table that contains fertilization rates for the crops in the simulation, though it can contain additional crops not used in the simulation. The headers must be ‘crop_name’, ‘nitrogen_rate’, ‘phosphorus_rate’, and ‘potassium_rate’, where ‘crop_name’ is the name string used to identify crops in the ‘landcover_to_crop_table_path’, and rates are in units kg/Ha.",
+      "aggregate_polygon_path": "Path to polygon vector that will be used to aggregate crop yields and total nutrient value. (optional, if value is None, then skipped)",
+      "regression_yield_csv_table": "Path to a table that maps each crop name to a path to its corresponding regression yield table.",
+      "climate_bin_raster_table": "Path to a table that maps each crop name to a path to its corresponding climate bin raster.",
+      "observed_yield_raster_table": "Path to a table that maps each crop name to a path to its corresponding observed yield raster.",
+      "crop_nutrient_table": "Path to a table that lists amounts of nutrients in each crop."
+    }
+  },
+  "run_pollination": {
+    "description": "",
+    "params": {
+      "workspace_dir": "A path to the output workspace folder. Will overwrite any files that exist if the path already exists.",
+      "results_suffix": "String appended to each output file path.",
+      "landcover_raster_path": "File path to a landcover raster.",
+      "guild_table_path": "File path to a table indicating the bee species to analyze in this model run. Table headers must include: ’species’: a bee species whose column string names will be referred to in other tables and the model will output analyses per species. one or more columns matching _NESTING_SUITABILITY_PATTERN with values in the range [0, 1] indicating the suitability of the given species to nest in a particular substrate. one or more columns matching _FORAGING_ACTIVITY_RE_PATTERN with values in the range [0, 1] indicating the relative level of foraging activity for that species during a particular season. _ALPHA_HEADER the sigma average flight distance of that bee species in meters. ’relative_abundance’: a weight indicating the relative abundance of the particular species with respect to the sum of all relative abundance weights in the table.",
+      "landcover_biophysical_table_path": "Path to a table mapping landcover codes in args[‘landcover_path’] to indexes of nesting availability for each nesting substrate referenced in guilds table as well as indexes of abundance of floral resources on that landcover type per season in the bee activity columns of the guild table. All indexes are in the range [0, 1]. Columns in the table must be at least ’lucode’: representing all the unique landcover codes in the raster ast args[‘landcover_path’] For every nesting matching _NESTING_SUITABILITY_PATTERN in the guild stable, a column matching the pattern in _LANDCOVER_NESTING_INDEX_HEADER . For every season matching _FORAGING_ACTIVITY_RE_PATTERN in the guilds table, a column matching the pattern in _LANDCOVER_FLORAL_RESOURCES_INDEX_HEADER .",
+      "farm_vector_path": "Path to a single layer polygon shapefile representing farms. If present will trigger the farm yield component of the model. The layer must have at least the following fields: season (string): season in which the farm needs pollination crop_type (string): a text field to identify the crop type for summary statistics. half_sat (float): a real in the range [0, 1] representing the proportion of wild pollinators to achieve a 50% yield of that crop. p_dep (float): a number in the range [0, 1] representing the proportion of yield dependent on pollinators. p_managed (float): proportion of pollinators that come from non-native/managed hives. fr_[season] (float): one or more fields that match this pattern such that season also matches the season headers in the biophysical and guild table. Any areas that overlap the landcover map will replace seasonal floral resources with this value. Ranges from 0..1. n_[substrate] (float): One or more fields that match this pattern such that substrate also matches the nesting substrate headers in the biophysical and guild table. Any areas that overlap the landcover map will replace nesting substrate suitability with this value. Ranges from 0..1.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_forest_carbon_edge_effect": {
+    "description": "Forest Carbon Edge Effect. InVEST Carbon Edge Model calculates the carbon due to edge effects in tropical forest pixels.",
+    "params": {
+      "workspace_dir": "A path to the directory that will write output and other temporary files during calculation. (required)",
+      "results_suffix": "A string to append to any output file name (optional)",
+      "n_nearest_model_points": "Number of nearest neighbor model points to search for",
+      "aoi_vector_path": "If present, a path to a shapefile that will be used to aggregate carbon stock results at the end of the run.",
+      "biophysical_table_path": "A path to a CSV table that has at least the fields ‘lucode’ and ‘c_above’. If args['compute_forest_edge_effects'] == True , table must also contain an ‘is_tropical_forest’ field. If args['pools_to_calculate'] == 'all' , this table must contain the fields ‘c_below’, ‘c_dead’, and ‘c_soil’. lucode : an integer that corresponds to landcover codes in the raster args['lulc_raster_path'] is_tropical_forest : either 0 or 1 indicating whether the landcover type is forest (1) or not (0). If 1, the value in c_above is ignored and instead calculated from the edge regression model. c_above : floating point number indicating tons of above ground carbon per hectare for that landcover type {'c_below', 'c_dead', 'c_soil'} : three other optional carbon pools that will statically map landcover types to the carbon densities in the table. Example: lucode , is_tropical_forest , c_above , c_soil , c_dead , c_below 0 , 0 , 32.8 , 5 , 5.2 , 2.1 1 , 1 , n / a , 2.5 , 0.0 , 0.0 2 , 1 , n / a , 1.8 , 1.0 , 0.0 16 , 0 , 28.1 , 4.3 , 0.0 , 2.0 Note the “n/a” in c_above are optional since that field is ignored when is_tropical_forest==1 .",
+      "lulc_raster_path": "Path to a integer landcover code raster",
+      "pools_to_calculate": "If “all” then all carbon pools will be calculted. If any other value only above ground carbon pools will be calculated and expect only a ‘c_above’ header in the biophysical table. If “all” model expects ‘c_above’, ‘c_below’, ‘c_dead’, ‘c_soil’ in header of biophysical_table and will make a translated carbon map for each based off the landcover map.",
+      "compute_forest_edge_effects": "If True, requires biophysical table to have ‘is_tropical_forest’ forest field, and any landcover codes that have a 1 in this column calculate carbon stocks using the Chaplin-Kramer et. al method and ignore ‘c_above’.",
+      "tropical_forest_edge_carbon_model_vector_path": "Path to a shapefile that defines the regions for the local carbon edge models. Has at least the fields ‘method’, ‘theta1’, ‘theta2’, ‘theta3’. Where ‘method’ is an int between 1..3 describing the biomass regression model, and the thetas are floating point numbers that have different meanings depending on the ‘method’ parameter. Specifically, method 1 (asymptotic model): biomass = theta1 - theta2 * exp ( - theta3 * edge_dist_km ) method 2 (logarithmic model): # NOTE: theta3 is ignored for this method biomass = theta1 + theta2 * numpy . log ( edge_dist_km ) method 3 (linear regression): biomass = theta1 + theta2 * edge_dist_km",
+      "biomass_to_carbon_conversion_factor": "Number by which to multiply forest biomass to convert to carbon in the edge effect calculation.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_habitat_quality": {
+    "description": "This model calculates habitat degradation and quality for the current LULC as described in the InVEST user’s guide. Optionally execute calculates habitat degradation and quality for a future LULC and habitat rarity for current and future LULC.",
+    "params": {
+      "args": "A key, value mapping for the habitat quality inputs.",
+      "workspace_dir": "A path to the directory that will write output and other temporary files (required)",
+      "lulc_cur_path": "A path to an input land use/land cover raster (required)",
+      "lulc_fut_path": "A path to an input land use/land cover raster (optional)",
+      "lulc_bas_path": "A path to an input land use/land cover raster (optional, but required for rarity calculations)",
+      "threats_table_path": "A path to an input CSV containing data of all the considered threats. Each row is a degradation source and each column a different attribute of the source with the following names (case-insensitive): ‘THREAT’,’MAX_DIST’,’WEIGHT’, ‘DECAY’, ‘CUR_PATH’ (required) ‘BASE_PATH’, ‘FUT_PATH’ (optional).",
+      "access_vector_path": "A path to an input polygon shapefile containing data on the relative protection against threats (optional)",
+      "sensitivity_table_path": "A path to an input CSV file of LULC types, whether they are considered habitat, and their sensitivity to each threat (required)",
+      "half_saturation_constant": "A python float that determines the spread and central tendency of habitat quality scores (required)",
+      "results_suffix": "A python string that will be inserted into all raster path paths just before the file extension.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_habitat_risk_assessment": {
+    "description": "",
+    "params": {
+      "workspace_dir": "A path to the output workspace folder. It will overwrite any files that exist if the path already exists.",
+      "results_suffix": "A string appended to each output file path. (optional)",
+      "info_table_path": "A path to the CSV or Excel file that contains the name of the habitat (H) or stressor (s) on the NAME column that matches the names in criteria_table_path. Each H/S has its corresponding vector or raster path on the PATH column. The STRESSOR BUFFER (meters) column should have a buffer value if the TYPE column is a stressor.",
+      "criteria_table_path": "A path to the CSV or Excel file that contains the set of criteria ranking of each stressor on each habitat.",
+      "resolution": "A number representing the desired pixel dimensions of output rasters in meters.",
+      "max_rating": "A number representing the highest potential value that should be represented in rating in the criteria scores table.",
+      "risk_eq": "A string identifying the equation that should be used in calculating risk scores for each H-S overlap cell. This will be either ‘Euclidean’ or ‘Multiplicative’.",
+      "decay_eq": "A string identifying the equation that should be used in calculating the decay of stressor buffer influence. This can be ‘None’, ‘Linear’, or ‘Exponential’.",
+      "aoi_vector_path": "A path to the shapefile containing one or more planning regions used to get the average risk value for each habitat-stressor combination over each area. Optionally, if each of the shapefile features contain a ‘name’ field, it will be used as a way of identifying each individual shape.",
+      "n_overlapping_stressors": "This number will be used in risk reclassification instead of the calculated maximum number of stressor layers that overlap.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process. (optional)",
+      "visualize_outputs": "If True, create output GeoJSONs and save them in a visualization_outputs folder, so users can visualize results on the web app. Default to True if not specified. (optional)"
+    }
+  },
+  "run_nutrient_delivery_ratio": {
+    "description": "",
+    "params": {
+      "workspace_dir": "Path to current workspace",
+      "dem_path": "Path to digital elevation map raster",
+      "lulc_path": "A path to landcover map raster",
+      "runoff_proxy_path": "A path to a runoff proxy raster",
+      "watersheds_path": "Path to the watershed shapefile",
+      "biophysical_table_path": "Path to csv table on disk containing nutrient retention values. For each nutrient type [t] in args[‘calc_[t]’] that is true, must contain the following headers: ’load_[t]’, ‘eff_[t]’, ‘crit_len_[t]’ If args[‘calc_n’] is True, must also contain the header ‘proportion_subsurface_n’ field.",
+      "calc_p": "If True, phosphorus is modeled, additionally if True then biophysical table must have p fields in them",
+      "calc_n": "If True nitrogen will be modeled, additionally biophysical table must have n fields in them.",
+      "results_suffix": "A text field to append to all output files",
+      "threshold_flow_accumulation": "A number representing the flow accumulation in terms of upslope pixels.",
+      "k_param": "The Borselli k parameter. This is a calibration parameter that determines the shape of the relationship between hydrologic connectivity.",
+      "runoff_proxy_av": "The average runoff proxy. Used to calculate the runoff proxy index. If not specified, it will be automatically calculated.",
+      "subsurface_critical_length_n": "The distance (traveled subsurface and downslope) after which it is assumed that soil retains nutrient at its maximum capacity, given in meters. If dissolved nutrients travel a distance smaller than Subsurface Critical Length, the retention efficiency will be lower than the Subsurface Maximum Retention Efficiency value defined. Setting this value to a distance smaller than the pixel size will result in the maximum retention efficiency being reached within one pixel only. Required if calc_n .",
+      "subsurface_eff_n": "The maximum nutrient retention efficiency that can be reached through subsurface flow, a floating point value between 0 and 1. This field characterizes the retention due to biochemical degradation in soils. Required if calc_n .",
+      "n_workers": "If present, indicates how many worker processes should be used in parallel processing. -1 indicates single process mode, 0 is single process but non-blocking mode, and >= 1 is number of processes."
+    }
+  },
+  "run_sediment_delivery_ratio": {
+    "description": "This function calculates the sediment export and retention of a landscape using the sediment delivery ratio model described in the InVEST user’s guide.",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files",
+      "results_suffix": "String to append to any output file names",
+      "dem_path": "Path to a digital elevation raster",
+      "erosivity_path": "Path to rainfall erosivity index raster",
+      "erodibility_path": "A path to soil erodibility raster",
+      "lulc_path": "Path to land use/land cover raster",
+      "watersheds_path": "Path to vector of the watersheds",
+      "biophysical_table_path": "Path to CSV file with biophysical information of each land use classes. contain the fields ‘usle_c’ and ‘usle_p’",
+      "threshold_flow_accumulation": "Number of upslope pixels on the dem to threshold to a stream.",
+      "k_param": "K calibration parameter",
+      "sdr_max": "Max value the SDR",
+      "ic_0_param": "Ic_0 calibration parameter",
+      "drainage_path": "Path to drainage raster that is used to add additional drainage areas to the internally calculated stream layer",
+      "l_max": "The maximum allowed value of the slope length parameter (L) in the LS factor. If the calculated value of L exceeds ‘l_max’ it will be clamped to this value.",
+      "n_workers": "If present, indicates how many worker processes should be used in parallel processing. -1 indicates single process mode, 0 is single process but non-blocking mode, and >= 1 is number of processes."
+    }
+  },
+  "run_seasonal_water_yield": {
+    "description": "",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files",
+      "results_suffix": "String to append to any output files",
+      "threshold_flow_accumulation": "Used when classifying stream pixels from the DEM by thresholding the number of upslope cells that must flow into a cell before it’s considered part of a stream.",
+      "et0_raster_table": "Required if args[‘user_defined_local_recharge’] is False. Path to a CSV table that has headers ‘month’ (1-12) and ‘path’, mapping months to monthly reference evapotranspiration rasters. The rasters should have units in mm.",
+      "precip_raster_table": "Required if args[‘user_defined_local_recharge’] is False. Path to a CSV table that has headers ‘month’ (1-12) and ‘path’, mapping months to monthly precipitation rasters. The rasters should have units in mm.",
+      "dem_raster_path": "A path to a digital elevation raster",
+      "lulc_raster_path": "A path to a land cover raster used to classify biophysical properties of pixels.",
+      "soil_group_path": "Required if args[‘user_defined_local_recharge’] is False. A path to a raster indicating SCS soil groups where integer values are mapped to soil types",
+      "aoi_path": "Path to a vector that indicates the area over which the model should be run, as well as the area in which to aggregate over when calculating the output Qb.",
+      "biophysical_table_path": "Path to a CSV table that maps landcover codes paired with soil group types to curve numbers as well as Kc values. Headers must include ‘lucode’, ‘CN_A’, ‘CN_B’, ‘CN_C’, ‘CN_D’, ‘Kc_1’, ‘Kc_2’, ‘Kc_3’, ‘Kc_4’, ‘Kc_5’, ‘Kc_6’, ‘Kc_7’, ‘Kc_8’, ‘Kc_9’, ‘Kc_10’, ‘Kc_11’, ‘Kc_12’.",
+      "rain_events_table_path": "Not required if args[‘user_defined_local_recharge’] is True or args[‘user_defined_climate_zones’] is True. Path to a CSV table that has headers ‘month’ (1-12) and ‘events’ (int >= 0) that indicates the number of rain events per month",
+      "alpha_m": "Required if args[‘monthly_alpha’] is false. Is the proportion of upslope annual available local recharge that is available in month m.",
+      "beta_i": "Is the fraction of the upgradient subsidy that is available for downgradient evapotranspiration.",
+      "gamma": "Is the fraction of pixel local recharge that is available to downgradient pixels.",
+      "user_defined_local_recharge": "If True, indicates user will provide pre-defined local recharge raster layer",
+      "l_path": "Required if args[‘user_defined_local_recharge’] is True. If provided pixels indicate the amount of local recharge; units in mm.",
+      "user_defined_climate_zones": "If True, user provides a climate zone rain events table and a climate zone raster map in lieu of a global rain events table.",
+      "climate_zone_table_path": "Required if args[‘user_defined_climate_zones’] is True. Contains monthly precipitation events per climate zone. Fields must be “cz_id”, “jan”, “feb”, “mar”, “apr”, “may”, “jun”, “jul”, “aug”, “sep”, “oct”, “nov”, “dec”.",
+      "climate_zone_raster_path": "Required if args[‘user_defined_climate_zones’] is True, pixel values correspond to the “cz_id” values defined in args[‘climate_zone_table_path’]",
+      "monthly_alpha": "If True, use the alpha",
+      "monthly_alpha_path": "Required if args[‘monthly_alpha’] is True. A CSV file.",
+      "n_workers": "Indicates the number of processes to devote to potential parallel task execution. A value < 0 will use a single process, 0 will be non-blocking scheduling but single process, and >= 1 will make additional processes for parallel execution."
+    }
+  },
+  "run_recreation": {
+    "description": "Execute recreation client model on remote server.",
+    "params": {
+      "workspace_dir": "Path to workspace directory",
+      "aoi_path": "Path to AOI vector",
+      "hostname": "FQDN to recreation server",
+      "port": "Port on hostname for recreation server",
+      "start_year": "Start year in form YYYY. This year is the inclusive lower bound to consider points in the PUD and regression.",
+      "end_year": "End year in form YYYY. This year is the inclusive upper bound to consider points in the PUD and regression.",
+      "grid_aoi": "If true the polygon vector in args['aoi_path'] should be gridded into a new vector and the recreation model should be executed on that",
+      "grid_type": "Optional, but must exist if args[‘grid_aoi’] is True. Is one of ‘hexagon’ or ‘square’ and indicates the style of gridding.",
+      "cell_size": "Optional, but must exist if args['grid_aoi'] is True. Indicates the cell size of square pixels and the width of the horizontal axis for the hexagonal cells.",
+      "compute_regression": "If True, then process the predictor table and scenario table (if present).",
+      "predictor_table_path": "Required if args[‘compute_regression’] is True. Path to a table that describes the regression predictors, their IDs and types. Must contain the fields ‘id’, ‘path’, and ‘type’ where: ’id’: is a <=10 character length ID that is used to uniquely describe the predictor. It will be added to the output result shapefile attribute table which is an ESRI Shapefile, thus limited to 10 characters. ’path’: an absolute or relative (to this table) path to the predictor dataset, either a vector or raster type. ’type’: one of the following, ’raster_mean’: mean of values in the raster under the response polygon ’raster_sum’: sum of values in the raster under the response polygon ’point_count’: count of the points contained in the response polygon ’point_nearest_distance’: distance to the nearest point from the centroid of the response polygon ’line_intersect_length’: length of lines that intersect with the response polygon in projected units of AOI ’polygon_area’: area of the polygon contained within response polygon in projected units of AOI ’polygon_percent_coverage’: percent (0-100) of area of overlap between the predictor and each AOI grid cell",
+      "scenario_predictor_table_path": "If present runs the scenario mode of the recreation model with the datasets described in the table on this path. Field headers are identical to args['predictor_table_path'] and ids in the table are required to be identical to the predictor list.",
+      "results_suffix": "Optional, if exists is appended to any output file paths."
+    }
+  },
+  "run_coastal_vulnerability": {
+    "description": "For points along a coastline, evaluate the relative exposure of points to coastal hazards based on up to eight biophysical hazard indices. Also quantify the role of habitats in reducing the hazard. Optionally summarize the population density in proximity to each shore point.",
+    "params": {
+      "workspace_dir": "A path to the directory that will write output and other temporary files during calculation.",
+      "results_suffix": "Appended to any output filename.",
+      "aoi_vector_path": "Path to a polygon vector that is projected in a coordinate system with units of meters. The polygon should intersect the landmass and the shelf contour line.",
+      "model_resolution": "Distance in meters. Points are spaced along the coastline at intervals of this distance.",
+      "landmass_vector_path": "Path to a polygon vector representing landmasses in the region of interest.",
+      "wwiii_vector_path": "Path to a point vector containing wind and wave information across the region of interest.",
+      "max_fetch_distance": "Maximum distance in meters to extend rays from shore points. Points with rays equal to this distance will accumulate ocean-driven wave exposure along those rays and local-wind-driven wave exposure along the shorter rays.",
+      "bathymetry_raster_path": "Path to a raster representing the depth below sea level, in negative meters. Should cover the area extending outward from the AOI to the max_fetch_distance.",
+      "shelf_contour_vector_path": "Path to a polyline vector delineating edges of the continental shelf or other bathymetry contour.",
+      "dem_path": "Path to a raster representing the elevation on land in the region of interest.",
+      "dem_averaging_radius": "A value >= 0. The radius in meters around each shore point in which to compute the average elevation.",
+      "habitat_table_path": "Path to a CSV file with the following four fields: ‘id’: unique string to represent each habitat; ‘path’: absolute or relative path to a polygon vector; ‘rank’: integer from 1 to 5 representing the relative protection offered by this habitat; ‘protection distance (m)’: integer or float used as a search radius around each shore point.",
+      "geomorphology_vector_path": "Path to a polyline vector that has a field called “RANK” with values from 1 to 5 in the attribute table.",
+      "geomorphology_fill_value": "A value from 1 to 5 that will be used as a geomorphology rank for any points not proximate to the geomorphology_vector_path.",
+      "population_raster_path": "Path a raster with values of total population per pixel.",
+      "population_radius": "A value >= 0. The radius in meters around each shore point in which to compute the population density.",
+      "slr_vector_path": "Path to point vector containing the field args['slr_field'] .",
+      "slr_field": "Name of a field in args['slr_vector_path'] containing numeric values.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_delineateit": {
+    "description": "This ‘model’ provides an InVEST-based wrapper around the pygeoprocessing routing API for watershed delineation. Upon successful completion, the following files are written to the output workspace:",
+    "params": {
+      "workspace_dir": "The selected folder is used as the workspace all intermediate and output files will be written.If the selected folder does not exist, it will be created. If datasets already exist in the selected folder, they will be overwritten. (required)",
+      "results_suffix": "This text will be appended to the end of output files to help separate multiple runs. (optional)",
+      "dem_path": "A GDAL-supported raster file with an elevation for each cell. Make sure the DEM is corrected by filling in sinks, and if necessary burning hydrographic features into the elevation model (recommended when unusual streams are observed.) See the ‘Working with the DEM’ section of the InVEST User’s Guide for more information. (required)",
+      "outlet_vector_path": "This is a vector representing geometries that the watersheds should be built around. Required if args['detect_pour_points'] is False; not used otherwise.",
+      "snap_points": "Whether to snap point geometries to the nearest stream pixel. If True , args['flow_threshold'] and args['snap_distance'] must also be defined.",
+      "flow_threshold": "The number of upslope cells that must flow into a cell before it’s considered part of a stream such that retention stops and the remaining export is exported to the stream. Used to define streams from the DEM.",
+      "snap_distance": "Pixel Distance to Snap Outlet Points",
+      "skip_invalid_geometry": "Whether to crash when an invalid geometry is passed or skip it, including all valid geometries in the vector to be passed to delineation. If False , this tool will crash if an invalid geometry is found. If True , invalid geometries will be left out of the vector to be delineated. Default: True",
+      "detect_pour_points": "Whether to run the pour point detection algorithm. If True, detected pour points are used instead of outlet_vector_path geometries. Default: False",
+      "n_workers": "The number of worker processes to use with taskgraph. Defaults to -1 (no parallelism)."
+    }
+  },
+  "run_routedem": {
+    "description": "This model exposes the pygeoprocessing D8 and Multiple Flow Direction routing functionality as an InVEST model. This tool will always fill pits on the input DEM.",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files",
+      "results_suffix": "String to append to any output file names",
+      "dem_path": "Path to a digital elevation raster",
+      "dem_band_index": "Optional. The band index to operate on. If not provided, band index 1 is assumed.",
+      "algorithm": "The routing algorithm to use. Must be one of ‘D8’ or ‘MFD’ (case-insensitive). Required when calculating flow direction, flow accumulation, stream threshold, and downslope distance.",
+      "calculate_flow_direction": "If True, model will calculate flow direction for the filled DEM.",
+      "calculate_flow_accumulation": "If True, model will calculate a flow accumulation raster. Only applies when args[‘calculate_flow_direction’] is True.",
+      "calculate_stream_threshold": "If True, model will calculate a stream classification layer by thresholding flow accumulation to the provided value in args['threshold_flow_accumulation'] . Only applies when args[‘calculate_flow_accumulation’] and args[‘calculate_flow_direction’] are True.",
+      "threshold_flow_accumulation": "The number of upslope cells that must flow into a cell before it’s classified as a stream.",
+      "calculate_downslope_distance": "If True, and a stream threshold is calculated, model will calculate a downslope distance raster in units of pixels. Only applies when args[‘calculate_flow_accumulation’], args[‘calculate_flow_direction’], and args[‘calculate_stream_threshold’] are all True.",
+      "calculate_slope": "If True, model will calculate a slope raster from the DEM.",
+      "calculate_stream_order": "If True, model will create a vector of the Strahler stream order.",
+      "calculate_subwatersheds": "If True, the model will create a vector of subwatersheds.",
+      "n_workers": "The n_workers parameter to pass to the task graph. The default is -1 if not provided."
+    }
+  },
+  "run_scenic_quality": {
+    "description": "",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files.",
+      "results_suffix": "String to append to any output file.",
+      "aoi_path": "Path to a vector that indicates the area over which the model should be run.",
+      "structure_path": "Path to a point vector that has the features for the viewpoints. Optional fields: ‘WEIGHT’, ‘RADIUS’ / ‘RADIUS2’, ‘HEIGHT’",
+      "dem_path": "Path to a digital elevation model raster.",
+      "refraction": "Number indicating the refraction coefficient to use for calculating curvature of the earth.",
+      "do_valuation": "Indicates whether to compute valuation. If False , per-viewpoint value will not be computed, and the summation of valuation rasters (vshed_value.tif) will not be created. Additionally, the Viewshed Quality raster will represent the weighted sum of viewsheds. Default: False .",
+      "valuation_function": "The type of economic function to use for valuation. One of “linear”, “logarithmic”, or “exponential”.",
+      "a_coef": "The “a” coefficient for valuation. Required if args['do_valuation'] is True .",
+      "b_coef": "The “b” coefficient for valuation. Required if args['do_valuation'] is True .",
+      "max_valuation_radius": "Past this distance from the viewpoint, the valuation raster’s pixel values will be set to 0. Required if args['do_valuation'] is True .",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_scenario_gen_proximity": {
+    "description": "Main entry point for proximity based scenario generator model.",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary, and final files",
+      "results_suffix": "String to append to any output files",
+      "base_lulc_path": "Path to the base landcover map",
+      "replacement_lucode": "Code to replace when converting pixels",
+      "area_to_convert": "Max area (Ha) to convert",
+      "focal_landcover_codes": "A space separated string of landcover codes that are used to determine the proximity when refering to “towards” or “away” from the base landcover codes",
+      "convertible_landcover_codes": "A space separated string of landcover codes that can be converted in the generation phase found in args[‘base_lulc_path’] .",
+      "n_fragmentation_steps": "An int as a string indicating the number of steps to take for the fragmentation conversion",
+      "aoi_path": "Path to a shapefile that indicates area of interest. If present, the expansion scenario operates only under that AOI and the output raster is clipped to that shape.",
+      "convert_farthest_from_edge": "If True will run the conversion simulation starting from the furthest pixel from the edge and work inwards. Workspace will contain output files named ‘toward_base{suffix}.{tif,csv}.",
+      "convert_nearest_to_edge": "If True will run the conversion simulation starting from the nearest pixel on the edge and work inwards. Workspace will contain output files named ‘toward_base{suffix}.{tif,csv}.",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process."
+    }
+  },
+  "run_urban_cooling": {
+    "description": "",
+    "params": {
+      "workspace_dir": "Path to target output directory.",
+      "results_suffix": "String to append to any output file names",
+      "t_ref": "Reference air temperature.",
+      "lulc_raster_path": "Path to landcover raster. This raster must be in a linearly-projected CRS.",
+      "ref_eto_raster_path": "Path to evapotranspiration raster.",
+      "aoi_vector_path": "Path to desired AOI.",
+      "biophysical_table_path": "Table to map landcover codes to Shade, Kc, and Albedo values. Must contain the fields ‘lucode’, ‘kc’, and ‘green_area’. If args['cc_method'] == 'factors' , then this table must also contain the fields ‘shade’ and ‘albedo’. If args['cc_method'] == 'intensity' , then this table must also contain the field ‘building_intensity’.",
+      "green_area_cooling_distance": "Distance (in m) over which large green areas (> 2 ha) will have a cooling effect.",
+      "t_air_average_radius": "Radius of the averaging filter for turning T_air_nomix into T_air.",
+      "uhi_max": "Magnitude of the UHI effect.",
+      "do_energy_valuation": "If True, calculate energy savings valuation for buildings.",
+      "do_productivity_valuation": "If True, calculate work productivity valuation based on humidity and temperature.",
+      "avg_rel_humidity": "(optional, depends on ‘do_productivity_valuation’) Average relative humidity (0-100%).",
+      "building_vector_path": "(str) (optional, depends on ‘do_energy_valuation’) path to a vector of building footprints that contains at least the field ‘type’.",
+      "energy_consumption_table_path": "(optional, depends on ‘do_energy_valuation’) path to a table that maps building types to energy consumption. Must contain at least the fields ‘type’ and ‘consumption’.",
+      "cc_method": "Either “intensity” or “factors”. If “intensity”, then the “building_intensity” column must be present in the biophysical table. If “factors”, then args['cc_weight_shade'] , args['cc_weight_albedo'] , args['cc_weight_eti'] may be set to alternative weights if desired.",
+      "cc_weight_shade": "Floating point number representing the relative weight to apply to shade when calculating the cooling index. Default: 0.6",
+      "cc_weight_albedo": "Floating point number representing the relative weight to apply to albedo when calculating the cooling index. Default: 0.2",
+      "cc_weight_eti": "Floating point number representing the relative weight to apply to ETI when calculating the cooling index. Default: 0.2"
+    }
+  },
+  "run_urban_flood": {
+    "description": "Urban Flood Risk Mitigation. The model computes the peak flow attenuation for each pixel, delineates areas benefiting from this service, then calculates the monetary value of potential avoided damage to built infrastructure.",
+    "params": {
+      "workspace_dir": "A path to the directory that will write output and other temporary files during calculation.",
+      "results_suffix": "Appended to any output file name.",
+      "aoi_watersheds_path": "Path to a shapefile of (sub)watersheds or sewersheds used to indicate spatial area of interest.",
+      "rainfall_depth": "Depth of rainfall in mm.",
+      "lulc_path": "Path to a landcover raster.",
+      "soils_hydrological_group_raster_path": "Raster with values equal to 1, 2, 3, 4, corresponding to soil hydrologic group A, B, C, or D, respectively (used to derive the CN number).",
+      "curve_number_table_path": "Path to a CSV table that contains at least the headers ‘lucode’, ‘CN_A’, ‘CN_B’, ‘CN_C’, ‘CN_D’.",
+      "built_infrastructure_vector_path": "Path to a vector with built infrastructure footprints. Attribute table contains a column ‘Type’ with integers (e.g. 1=residential, 2=office, etc.).",
+      "infrastructure_damage_loss_table_path": "Path to a CSV table with columns ‘Type’ and ‘Damage’ with values of built infrastructure type from the ‘Type’ field in args['built_infrastructure_vector_path'] and potential damage loss (in currency/m^2).",
+      "n_workers": "If present, indicates how many worker processes should be used in parallel processing. -1 indicates single process mode, 0 is single process but non-blocking mode, and >= 1 is number of processes."
+    }
+  },
+  "run_urban_mental_health": {
+    "description": "The model estimates the impacts of nature exposure, and more specifically residential greenness, on mental health. Residential nature exposure is defined as the average NDVI within a distance of a residence that benefits human mental health. The mental health model calculates the preventable mental disorder cases at the pixel level, based on the selected urban greening scenario.",
+    "params": {
+      "workspace_dir": "A path to the directory that will write output, intermediate, and other temporary files during calculation.",
+      "results_suffix": "Appended to any output filename.",
+      "aoi_path": "Path to a polygon vector that is projected in a coordinate system with units of meters. The polygon should intersect the baseline prevalence vector and the population raster.",
+      "population_raster": "Path to a raster of gridded population data representing the number of people per pixel.",
+      "search_radius": "Distance used to define the surrounding area of a person’s residence that best represents daily exposure to nearby nature. Must be > 0.",
+      "effect_size": "Health indicator-specific effect size representing the relationship between nature exposure and the mental health outcome, given as relative risk associated with a 0.1 increase in NDVI.",
+      "baseline_prevalence_vector": "Path to a vector providing the baseline prevalence (or incidence) rate of a specific mental health outcome (e.g., depression or anxiety) across administrative units within the study area. This data allows the model to estimate preventable cases by comparing current rates with those projected under improved nature exposure scenarios. The vector must contain field risk_rate .",
+      "health_cost_rate": "The societal cost per case (e.g., in USD PPP) for the mental health outcome described by the baseline_prevalence_vector . This data enables the model to estimate the economic value of preventable cases under different urban nature scenarios. Costs can be specified at national, regional, or local levels depending on data availability.",
+      "model_option": "Which of the two land use options to model.",
+      "ndvi_base": "Required if args['model_option'] != 'lulc' or not args['lulc_attr_csv'] . A path to a Normalized Difference Vegetation Index raster representing current or baseline conditions, which gives the greenness of vegetation in a given cell.",
+      "ndvi_alt": "Required if args['model_option'] == 'ndvi' . A path to an NDVI raster under future or counterfactual conditions.",
+      "lulc_base": "Required if args['model_option'] == 'lulc' . A path to a Land Use/Land Cover raster showing current or baseline conditions.",
+      "lulc_alt": "Required if args['model_option'] == 'lulc' . A path to a Land Use/Land Cover raster showing a future or counterfactual scenario.",
+      "lulc_attr_csv": "Required if ( args['model_option'] == 'lulc' and not args['ndvi_base'] ) or ( args[model_option] != 'lulc' and lulc_base ). A path to a CSV table that maps LULC codes to corresponding NDVI values and specifies whether to exclude the LULC class from analysis. The table should contain the following fields: lucode (int): (required) Unique LULC class identifier. ndvi (float): Required if args['model_option'] == 'lulc' and not args['ndvi_base'] . NDVI value of the LULC class. exclude (bool): (required) Specifies whether to keep (0) or mask out (1) the LULC class."
+    }
+  },
+  "run_urban_nature_access": {
+    "description": "",
+    "params": {
+      "workspace_dir": "Output directory for intermediate, temporary and final files.",
+      "results_suffix": "String to append to any output file.",
+      "n_workers": "The number of worker processes to use for executing the tasks of this model. If omitted, computation will take place in the current process.",
+      "lulc_raster_path": "A string path to a GDAL-compatible land-use/land-cover raster containing integer landcover codes. Must be linearly projected in meters.",
+      "lulc_attribute_table": "A string path to a CSV with the following columns: lucode : (required) the integer landcover code represented. urban_nature : (required) a proportion (0-1) representing how much of this landcover type is urban nature. 0 indicates none of this type’s area is urban nature, 1 indicates all of this type’s area is urban nature. search_radius_m : (conditionally required) the search radius for this urban nature LULC class in meters. Required for all urban nature LULC codes if args['search_radius_mode'] == RADIUS_OPT_URBAN_NATURE",
+      "population_raster_path": "A string path to a GDAL-compatible raster where pixels represent the population of that pixel. Must be linearly projected in meters.",
+      "admin_boundaries_vector_path": "A string path to a GDAL-compatible vector containing polygon areas of interest, typically administrative boundaries. If this vector has any fields with fieldnames beginning with \"pop_\" , these will be treated as representing the proportion of the population within an admin unit belonging to the given population group. The name of the population group (everything other than a leading \"pop_\" ) must uniquely identify the group.",
+      "urban_nature_demand": "A positive, nonzero number indicating the required urban_nature, in m² per capita.",
+      "decay_function": "The selected kernel type. Must be one of the keys in KERNEL_TYPES .",
+      "search_radius_mode": ". The selected search radius mode. Must be one of RADIUS_OPT_UNIFORM , RADIUS_OPT_URBAN_NATURE , or RADIUS_OPT_POP_GROUP .",
+      "search_radius": "Required if args['search_radius_mode'] == RADIUS_OPT_UNIFORM . The search radius in meters to use in the analysis.",
+      "population_group_radii_table": "A table associating population groups with a search radius for that population group. Population group fieldnames must match population group fieldnames in the aoi vector.",
+      "aggregate_by_pop_group": "Whether to aggregate statistics by population groups in the target vector. This is implied when running the model with args['search_radius_mode'] == RADIUS_OPT_POP_GROUP"
+    }
+  },
+  "run_urban_stormwater": {
+    "description": "Execute the urban stormwater retention model.",
+    "params": {
+      "workspace_dir": "Path to a directory to write intermediate and final outputs. May already exist or not.",
+      "results_suffix": "String to append to all output file names from this model run",
+      "n_workers": "If present, indicates how many worker processes should be used in parallel processing. -1 indicates single process mode, 0 is single process but non-blocking mode, and >= 1 is number of processes.",
+      "lulc_path": "Path to LULC raster",
+      "soil_group_path": "Path to soil group raster, where pixel values 1, 2, 3, 4 correspond to groups A, B, C, D",
+      "precipitation_path": "Path to raster of total annual precipitation in millimeters",
+      "biophysical_table": "Path to biophysical table with columns ‘lucode’, ‘EMC_x’ (event mean concentration mg/L) for each pollutant x, ‘RC_y’ (retention coefficient) and ‘PE_y’ (percolation coefficient) for each soil group y, and ‘is_connected’ if args[‘adjust_retention_ratios’] is True",
+      "adjust_retention_ratios": "If True, apply retention ratio adjustment algorithm.",
+      "retention_radius": "If args[‘adjust_retention_ratios’] is True, use this radius in the adjustment algorithm.",
+      "road_centerliens_path": "Path to linestring vector of road centerlines. Only used if args[‘adjust_retention_ratios’] is True.",
+      "aggregate_areas_path": "Optional path to polygon vector of areas to aggregate results over.",
+      "replacement_cost": "Cost to replace stormwater retention devices in units currency per cubic meter"
+    }
+  },
+  "run_wave_energy": {
+    "description": "Executes both the biophysical and valuation parts of the wave energy model (WEM). Files will be written on disk to the intermediate and output directories. The outputs computed for biophysical and valuation include: wave energy capacity raster, wave power raster, net present value raster, percentile rasters for the previous three, and a point shapefile of the wave points with attributes.",
+    "params": {
+      "workspace_dir": "Where the intermediate and output folder/files will be saved. (required)",
+      "wave_base_data_table": "Path to wave base data table including WAVEWATCH III (WW3) data and analysis area shapefile. (required)",
+      "analysis_area": "A string identifying the analysis area of interest. Used to determine wave data shapefile, wave data text file, and analysis area boundary shape. (required)",
+      "aoi_path": "A polygon OGR vector outlining a more detailed area within the analysis area. This vector should be projected with linear units being in meters. (required to run Valuation model)",
+      "machine_perf_path": "The path of a CSV file that holds the machine performance table. (required)",
+      "machine_param_path": "The path of a CSV file that holds the machine parameter table. (required)",
+      "dem_path": "The path of the Global Digital Elevation Model (DEM). (required)",
+      "results_suffix": "A python string of characters to append to each output filename (optional)",
+      "valuation_container": "Indicates whether the model includes valuation",
+      "machine_econ_path": "A CSV file path for the machine economic parameters table. (required for Valuation)",
+      "number_of_machines": "An integer specifying the number of machines for a wave farm site. (required for Valuation)",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process. (optional)"
+    }
+  },
+  "run_offshore_wind_energy": {
+    "description": "This module handles the execution of the wind energy model given the following dictionary:",
+    "params": {
+      "workspace_dir": "A path to the output workspace folder (required)",
+      "wind_data_path": "Path to a CSV file with the following header [‘LONG’,’LATI’,’LAM’, ‘K’, ‘REF’]. Each following row is a location with at least the Longitude, Latitude, Scale (‘LAM’), Shape (‘K’), and reference height (‘REF’) at which the data was collected (required)",
+      "aoi_vector_path": "A path to an OGR polygon vector that is projected in linear units of meters. The polygon specifies the area of interest for the wind data points. If limiting the wind farm bins by distance, then the aoi should also cover a portion of the land polygon that is of interest (required)",
+      "bathymetry_path": "A path to a GDAL raster that has the depth values of the area of interest (required)",
+      "land_polygon_vector_path": "A path to an OGR polygon vector that provides a coastline for determining distances from wind farm bins (required)",
+      "global_wind_parameters_path": "A float for the average distance in kilometers from a grid connection point to a land connection point (required for valuation if grid connection points are not provided)",
+      "results_suffix": "A str to append to the end of the output files (optional)",
+      "turbine_parameters_path": "A path to a CSV file that holds the turbines biophysical parameters as well as valuation parameters (required)",
+      "number_of_turbines": "An integer value for the number of machines for the wind farm (required for valuation)",
+      "min_depth": "A float value for the minimum depth for offshore wind farm installation (meters) (required)",
+      "max_depth": "A float value for the maximum depth for offshore wind farm installation (meters) (required)",
+      "min_distance": "A float value for the minimum distance from shore for offshore wind farm installation (meters) (required)",
+      "max_distance": "A float value for the maximum distance from shore for offshore wind farm installation (meters) (required)",
+      "valuation_container": "Indicates whether model includes valuation",
+      "foundation_cost": "A float representing how much the foundation will cost for the specific type of turbine (required for valuation)",
+      "discount_rate": "A float value for the discount rate (required for valuation)",
+      "grid_points_path": "A path to a CSV file that specifies the landing and grid point locations (optional)",
+      "avg_grid_distance": "A float for the average distance in kilometers from a grid connection point to a land connection point (required for valuation if grid connection points are not provided)",
+      "price_table": "A bool indicating whether to use the wind energy price table or not (required)",
+      "wind_schedule": "A path to a CSV file for the yearly prices of wind energy for the lifespan of the farm (required if ‘price_table’ is true)",
+      "wind_price": "A float for the wind energy price at year 0 (required if price_table is false)",
+      "rate_change": "A float as a percent for the annual rate of change in the price of wind energy. (required if price_table is false)",
+      "n_workers": "The number of worker processes to use for processing this model. If omitted, computation will take place in the current process. (optional)"
+    }
+  }
+}

@@ -34,8 +34,11 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------------
 # Environment setup
 # ---------------------------------------------------------------------------
-env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-load_dotenv(env_path)
+# Self-contained: load .env from THIS directory first.
+# Falls back to the repo-root .env (two levels up) without overriding.
+_here = Path(__file__).resolve().parent
+load_dotenv(_here / ".env")                                     # server-local (highest priority)
+load_dotenv(_here.parent.parent / ".env", override=False)       # repo-root fallback
 
 # Ensure PROJ/GDAL find the correct database.
 # CONDA_PREFIX may point to the base env rather than the active telecoupling env,
@@ -280,6 +283,74 @@ def list_models() -> str:
         "recreation": "Estimates recreation visitation rates based on natural features and predictors",
     }
     return json.dumps(models, indent=2)
+
+
+# ========================================================================
+# 0d. Coastal Blue Carbon Preprocessor
+# ========================================================================
+@mcp.tool()
+def run_coastal_blue_carbon_preprocessor(
+    landcover_snapshot_csv: str,
+    lulc_lookup_table_path: str,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Run the InVEST Coastal Blue Carbon Preprocessor.
+
+    Generates the biophysical table and land-cover transition matrix that
+    the main Coastal Blue Carbon model (run_coastal_blue_carbon) requires.
+    Must be run before run_coastal_blue_carbon when starting from raw LULC
+    rasters.
+
+    After this tool finishes, open the output transitions_*.csv and fill in
+    the transition type for each LULC pair: 'accumulation', 'disturb', or
+    'NCC' (no change in carbon).  Then pass the edited file to
+    run_coastal_blue_carbon as landcover_transitions_table.
+
+    Args:
+        landcover_snapshot_csv: Path to a CSV with columns 'snapshot_year'
+            and 'raster_path' mapping each time-step to a LULC raster.
+            Raster paths may be absolute or relative to the CSV's directory.
+        lulc_lookup_table_path: Path to a CSV mapping LULC codes to class
+            names and a boolean is_coastal_blue_carbon_habitat column.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import csv as _csv
+    import natcap.invest.coastal_blue_carbon.preprocessor
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "cbc_preprocessor"))
+
+    # ── Resolve relative raster paths in the snapshot CSV ────────────────
+    # InVEST resolves paths relative to the CWD, not the CSV's directory.
+    # We rewrite the CSV with absolute paths so the model always finds the files.
+    snapshot_path = Path(landcover_snapshot_csv).resolve()
+    snapshot_dir  = snapshot_path.parent
+    abs_snapshot  = os.path.join(ws, f"snapshots_abs{results_suffix}.csv")
+
+    with open(snapshot_path, newline="", encoding="utf-8-sig") as f_in, \
+         open(abs_snapshot, "w", newline="", encoding="utf-8") as f_out:
+        reader = _csv.DictReader(f_in)
+        writer = _csv.DictWriter(f_out, fieldnames=reader.fieldnames)
+        writer.writeheader()
+        for row in reader:
+            raster = row.get("raster_path", "").strip()
+            if raster and not Path(raster).is_absolute():
+                row["raster_path"] = str((snapshot_dir / raster).resolve())
+            writer.writerow(row)
+
+    args = {
+        "landcover_snapshot_csv": abs_snapshot,
+        "lulc_lookup_table_path": lulc_lookup_table_path,
+        "workspace_dir":          ws,
+        "results_suffix":         results_suffix,
+    }
+    return run_invest_model(
+        "Coastal Blue Carbon Preprocessor",
+        natcap.invest.coastal_blue_carbon.preprocessor,
+        args,
+        ws,
+    )
 
 
 # ========================================================================
@@ -1080,13 +1151,816 @@ def run_recreation(
         args,
         ws,
     )
+# ====================================================================
+# Coastal Vulnerability
+# (auto-generated from coastal_vulnerability.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_coastal_vulnerability(
+    aoi_vector_path: str,
+    bathymetry_raster_path: str,
+    dem_averaging_radius: int,
+    dem_path: str,
+    geomorphology_fill_value: int,
+    geomorphology_vector_path: str,
+    landmass_vector_path: str,
+    max_fetch_distance: int,
+    model_resolution: int,
+    wwiii_vector_path: str,
+    habitat_table_path: str = "",
+    shelf_contour_vector_path: str = "",
+    slr_vector_path: str = "",
+    population_raster_path: str = "",
+    population_radius: int = 0,
+    slr_field: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """For points along a coastline, evaluate the relative exposure of points to
+    coastal hazards based on up to eight biophysical hazard indices. Also
+    quantify the role of habitats in reducing the hazard. Optionally
+    summarize the population density in proximity to each shore point.
+
+    Args:
+        aoi_vector_path: Path to a polygon vector that is projected in a
+            coordinate system with units of meters. The polygon should
+            intersect the landmass and the shelf contour line.
+        bathymetry_raster_path: Path to a raster representing the depth
+            below sea level, in negative meters. Should cover the area
+            extending outward from the AOI to the max_fetch_distance.
+        dem_averaging_radius: A value >= 0. The radius in meters around
+            each shore point in which to compute the average elevation.
+        dem_path: Path to a raster representing the elevation on land in
+            the region of interest.
+        geomorphology_fill_value: A value from 1 to 5 that will be used as
+            a geomorphology rank for any points not proximate to the
+            geomorphology_vector_path.
+        geomorphology_vector_path: Path to a polyline vector that has a
+            field called “RANK” with values from 1 to 5 in the attribute
+            table.
+        landmass_vector_path: Path to a polygon vector representing
+            landmasses in the region of interest.
+        max_fetch_distance: Maximum distance in meters to extend rays from
+            shore points. Points with rays equal to this distance will
+            accumulate ocean-driven wave exposure along those rays and
+            local-wind-driven wave exposure along the shorter rays.
+        model_resolution: Distance in meters. Points are spaced along the
+            coastline at intervals of this distance.
+        wwiii_vector_path: Path to a point vector containing wind and wave
+            information across the region of interest.
+        habitat_table_path: Path to a CSV file with the following four
+            fields: ‘id’: unique string to represent each habitat; ‘path’:
+            absolute or relative path to a polygon vector; ‘rank’: integer
+            from 1 to 5 representing the relative protection offered by
+            this habitat; ‘protection distance (m)’: integer or float used
+            as a search radius around each shore point.
+        shelf_contour_vector_path: Path to a polyline vector delineating
+            edges of the continental shelf or other bathymetry contour.
+        slr_vector_path: Path to point vector containing the field args['slr_field'] .
+        population_raster_path: Path a raster with values of total population per pixel.
+        population_radius: A value >= 0. The radius in meters around each
+            shore point in which to compute the population density.
+        slr_field: Name of a field in args['slr_vector_path'] containing numeric values.
+        workspace_dir: A path to the directory that will write output and
+            other temporary files during calculation.
+        results_suffix: Appended to any output filename.
+    """
+    import natcap.invest.coastal_vulnerability
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "coastal_vulnerability"))
+    args = {
+        "aoi_vector_path": aoi_vector_path,
+        "bathymetry_raster_path": bathymetry_raster_path,
+        "dem_averaging_radius": dem_averaging_radius,
+        "dem_path": dem_path,
+        "geomorphology_fill_value": geomorphology_fill_value,
+        "geomorphology_vector_path": geomorphology_vector_path,
+        "landmass_vector_path": landmass_vector_path,
+        "max_fetch_distance": max_fetch_distance,
+        "model_resolution": model_resolution,
+        "wwiii_vector_path": wwiii_vector_path,
+        "habitat_table_path": habitat_table_path,
+        "shelf_contour_vector_path": shelf_contour_vector_path,
+        "slr_vector_path": slr_vector_path,
+        "population_raster_path": population_raster_path,
+        "population_radius": population_radius,
+        "slr_field": slr_field,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Coastal Vulnerability", natcap.invest.coastal_vulnerability, args, ws)
+
+
+
+
+# ========================================================================
+# 15. DelineateIt
+# ========================================================================
+@mcp.tool()
+def run_delineateit(
+    dem_path: str,
+    detect_pour_points: bool = False,
+    outlet_vector_path: str = "",
+    snap_points: bool = False,
+    flow_threshold: int = 1000,
+    snap_distance: int = 20,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Watershed delineation wrapper around pygeoprocessing routing.
+
+    Delineates watersheds from a DEM by snapping pour points to the nearest
+    stream and tracing upstream contributing areas.
+
+    Args:
+        dem_path: Path to a GDAL-supported elevation raster. Fill sinks
+            before use; consider burning hydrographic features first.
+        detect_pour_points: If True, auto-detect pour points from the DEM
+            instead of using outlet_vector_path. Default: False.
+        outlet_vector_path: Path to outlet points vector. Required when
+            detect_pour_points is False.
+        snap_points: If True, snap outlet points to the nearest stream pixel
+            (requires flow_threshold and snap_distance). Default: False.
+        flow_threshold: Minimum upslope cells to define a stream pixel
+            (used when snap_points=True). Default: 1000.
+        snap_distance: Maximum pixel distance to snap outlet points to a
+            stream (used when snap_points=True). Default: 20.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.delineateit.delineateit
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "delineateit"))
+    args = {
+        "dem_path":            dem_path,
+        "detect_pour_points":  detect_pour_points,
+        "snap_points":         snap_points,
+        "workspace_dir":       ws,
+        "results_suffix":      results_suffix,
+    }
+    if not detect_pour_points and clean_optional(outlet_vector_path):
+        args["outlet_vector_path"] = outlet_vector_path
+    if snap_points:
+        args["flow_threshold"] = flow_threshold
+        args["snap_distance"]  = snap_distance
+
+    return run_invest_model("DelineateIt", natcap.invest.delineateit.delineateit, args, ws)
+
+
+# ========================================================================
+# 16. RouteDEM
+# ========================================================================
+@mcp.tool()
+def run_routedem(
+    dem_path: str,
+    algorithm: str = "D8",
+    calculate_flow_direction: bool = True,
+    calculate_flow_accumulation: bool = True,
+    calculate_stream_threshold: bool = False,
+    threshold_flow_accumulation: int = 1000,
+    calculate_slope: bool = False,
+    calculate_stream_order: bool = False,
+    calculate_downstream_distance: bool = False,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Exposes pygeoprocessing D8 and MFD routing as an InVEST model.
+
+    Computes hydrological routing outputs from a DEM — flow direction, flow
+    accumulation, slope, stream networks, and downstream distance rasters.
+    Always fills pits on the input DEM before routing.
+
+    Args:
+        dem_path: Path to a digital elevation raster.
+        algorithm: Routing algorithm — 'D8' (single direction) or 'MFD'
+            (multiple flow direction). Default: 'D8'.
+        calculate_flow_direction: If True, compute flow direction raster. Default: True.
+        calculate_flow_accumulation: If True, compute flow accumulation raster.
+        calculate_stream_threshold: If True, compute stream classification
+            raster (requires threshold_flow_accumulation).
+        threshold_flow_accumulation: Minimum upslope cells to classify a
+            stream pixel (used when calculate_stream_threshold=True). Default: 1000.
+        calculate_slope: If True, compute slope raster.
+        calculate_stream_order: If True, compute Strahler stream order vector.
+        calculate_downstream_distance: If True, compute downstream
+            distance-to-stream raster.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.routedem
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "routedem"))
+    args = {
+        "dem_path":                      dem_path,
+        "algorithm":                     algorithm,
+        "calculate_flow_direction":      calculate_flow_direction,
+        "calculate_flow_accumulation":   calculate_flow_accumulation,
+        "calculate_stream_threshold":    calculate_stream_threshold,
+        "calculate_slope":               calculate_slope,
+        "calculate_stream_order":        calculate_stream_order,
+        "calculate_downstream_distance": calculate_downstream_distance,
+        "workspace_dir":                 ws,
+        "results_suffix":                results_suffix,
+    }
+    if calculate_stream_threshold:
+        args["threshold_flow_accumulation"] = threshold_flow_accumulation
+
+    return run_invest_model("RouteDEM", natcap.invest.routedem, args, ws)
+
+
+# ========================================================================
+# 17. Scenic Quality
+# ========================================================================
+@mcp.tool()
+def run_scenic_quality(
+    aoi_path: str,
+    structure_path: str,
+    dem_path: str,
+    refraction: float = 0.13,
+    do_valuation: bool = False,
+    valuation_function: str = "",
+    a_coef: float = 0.0,
+    b_coef: float = 0.0,
+    max_valuation_radius: float = 0.0,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Quantify the visual impact of built structures on scenic quality.
+
+    Runs viewshed analysis across the AOI and optionally computes the
+    economic value of view impairment (e.g. from wind turbines or cell towers).
+
+    Args:
+        aoi_path: Path to a vector indicating the area of interest.
+        structure_path: Path to a point vector with viewpoint features.
+            Optional fields: WEIGHT, RADIUS/RADIUS2, HEIGHT.
+        dem_path: Path to a digital elevation model raster.
+        refraction: Refraction coefficient for earth-curvature correction.
+            Default: 0.13.
+        do_valuation: If True, compute economic valuation of view impairment.
+            Default: False.
+        valuation_function: Valuation function type when do_valuation=True —
+            'linear', 'logarithmic', or 'exponential'.
+        a_coef: Coefficient 'a' in the valuation function.
+        b_coef: Coefficient 'b' in the valuation function.
+        max_valuation_radius: Beyond this distance (meters) pixel values are
+            set to 0. Leave 0 for no limit.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.scenic_quality.scenic_quality
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "scenic_quality"))
+    args = {
+        "aoi_path":       aoi_path,
+        "structure_path": structure_path,
+        "dem_path":       dem_path,
+        "refraction":     refraction,
+        "do_valuation":   do_valuation,
+        "workspace_dir":  ws,
+        "results_suffix": results_suffix,
+    }
+    if do_valuation:
+        args["valuation_function"] = valuation_function
+        args["a_coef"]             = a_coef
+        args["b_coef"]             = b_coef
+        if max_valuation_radius > 0:
+            args["max_valuation_radius"] = max_valuation_radius
+
+    return run_invest_model("Scenic Quality", natcap.invest.scenic_quality.scenic_quality, args, ws)
+
+
+# ========================================================================
+# 18. Scenario Generator — Proximity Based
+# ========================================================================
+@mcp.tool()
+def run_scenario_gen_proximity(
+    base_lulc_path: str,
+    replacement_lucode: int,
+    area_to_convert: float,
+    focal_landcover_codes: str,
+    convertible_landcover_codes: str,
+    convert_nearest_to_edge: bool = True,
+    convert_farthest_from_edge: bool = False,
+    n_fragmentation_steps: int = 1,
+    aoi_path: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Generate a modified LULC scenario by converting pixels nearest or
+    farthest from a focal landcover type up to a specified area target.
+
+    Args:
+        base_lulc_path: Path to the base land use/land cover raster.
+        replacement_lucode: LULC integer code to assign to converted pixels.
+        area_to_convert: Maximum area to convert in hectares.
+        focal_landcover_codes: Space-separated integer LULC codes defining
+            the focal/reference landcover (conversion proximity is measured
+            relative to these).
+        convertible_landcover_codes: Space-separated integer LULC codes
+            eligible for conversion.
+        convert_nearest_to_edge: If True, convert pixels nearest to the
+            focal landcover edge first. Default: True.
+        convert_farthest_from_edge: If True, convert pixels farthest from
+            the focal landcover edge first. Default: False.
+        n_fragmentation_steps: Number of fragmentation conversion steps. Default: 1.
+        aoi_path: Path to AOI shapefile — conversion is clipped to this area. (optional)
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.scenario_gen_proximity
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "scenario_gen_proximity"))
+    args = {
+        "base_lulc_path":              base_lulc_path,
+        "replacement_lucode":          replacement_lucode,
+        "area_to_convert":             area_to_convert,
+        "focal_landcover_codes":       focal_landcover_codes,
+        "convertible_landcover_codes": convertible_landcover_codes,
+        "convert_nearest_to_edge":     convert_nearest_to_edge,
+        "convert_farthest_from_edge":  convert_farthest_from_edge,
+        "n_fragmentation_steps":       n_fragmentation_steps,
+        "workspace_dir":               ws,
+        "results_suffix":              results_suffix,
+    }
+    if clean_optional(aoi_path):
+        args["aoi_path"] = aoi_path
+
+    return run_invest_model(
+        "Scenario Generator (Proximity)", natcap.invest.scenario_gen_proximity, args, ws
+    )
+
+
+# ========================================================================
+# 19. Urban Cooling
+# ========================================================================
+@mcp.tool()
+def run_urban_cooling(
+    lulc_raster_path: str,
+    ref_eto_raster_path: str,
+    aoi_vector_path: str,
+    biophysical_table_path: str,
+    green_area_cooling_distance: float,
+    t_ref: float,
+    uhi_max: float,
+    cc_method: str = "factors",
+    t_air_average_radius: float = 2000.0,
+    avg_rel_humidity: float = 30.0,
+    do_energy_valuation: bool = False,
+    do_productivity_valuation: bool = False,
+    building_vector_path: str = "",
+    energy_consumption_table_path: str = "",
+    cc_weight_shade: float = 0.6,
+    cc_weight_albedo: float = 0.2,
+    cc_weight_eti: float = 0.2,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Estimate the cooling effect of urban green spaces and quantify
+    associated energy savings and work productivity benefits.
+
+    Args:
+        lulc_raster_path: Path to land use/land cover raster (linearly
+            projected, units in meters).
+        ref_eto_raster_path: Path to reference evapotranspiration raster.
+        aoi_vector_path: Path to area of interest vector.
+        biophysical_table_path: CSV mapping LULC codes to shade, Kc,
+            albedo, and green_area values. Must include 'lucode', 'kc',
+            'green_area'. Include 'shade' and 'albedo' for cc_method='factors';
+            'building_intensity' for cc_method='intensity'.
+        green_area_cooling_distance: Distance in meters over which large
+            green areas (> 2 ha) exert a cooling effect.
+        t_ref: Reference (rural) air temperature (°C).
+        uhi_max: Maximum urban heat island effect magnitude (°C).
+        cc_method: Cooling capacity method — 'factors' (weighted CC indices)
+            or 'intensity' (NDVI/building-intensity based). Default: 'factors'.
+        t_air_average_radius: Radius in meters for averaging air temperature. Default: 2000.
+        avg_rel_humidity: Average relative humidity percentage 0–100. Default: 30.
+        do_energy_valuation: If True, calculate energy savings for buildings. Default: False.
+        do_productivity_valuation: If True, calculate work productivity gains. Default: False.
+        building_vector_path: Path to building footprint vector with 'type'
+            field (optional; required for energy valuation).
+        energy_consumption_table_path: Path to CSV mapping building types to
+            energy consumption (optional; required for energy valuation).
+        cc_weight_shade: Shade weight for CC index (0–1, must sum to 1). Default: 0.6.
+        cc_weight_albedo: Albedo weight for CC index (0–1). Default: 0.2.
+        cc_weight_eti: ETI weight for CC index (0–1). Default: 0.2.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.urban_cooling_model
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "urban_cooling"))
+    args = {
+        "lulc_raster_path":            lulc_raster_path,
+        "ref_eto_raster_path":         ref_eto_raster_path,
+        "aoi_vector_path":             aoi_vector_path,
+        "biophysical_table_path":      biophysical_table_path,
+        "green_area_cooling_distance": green_area_cooling_distance,
+        "t_ref":                       t_ref,
+        "uhi_max":                     uhi_max,
+        "cc_method":                   cc_method,
+        "t_air_average_radius":        t_air_average_radius,
+        "avg_rel_humidity":            avg_rel_humidity,
+        "do_energy_valuation":         do_energy_valuation,
+        "do_productivity_valuation":   do_productivity_valuation,
+        "workspace_dir":               ws,
+        "results_suffix":              results_suffix,
+    }
+    if cc_method == "factors":
+        args["cc_weight_shade"]  = cc_weight_shade
+        args["cc_weight_albedo"] = cc_weight_albedo
+        args["cc_weight_eti"]    = cc_weight_eti
+    if clean_optional(building_vector_path):
+        args["building_vector_path"] = building_vector_path
+    if clean_optional(energy_consumption_table_path):
+        args["energy_consumption_table_path"] = energy_consumption_table_path
+
+    return run_invest_model("Urban Cooling", natcap.invest.urban_cooling_model, args, ws)
+
+
+# ========================================================================
+# 20. Urban Flood Risk Mitigation
+# ========================================================================
+@mcp.tool()
+def run_urban_flood(
+    aoi_watersheds_path: str,
+    rainfall_depth: float,
+    lulc_path: str,
+    soils_hydrological_group_raster_path: str,
+    curve_number_table_path: str,
+    built_infrastructure_vector_path: str = "",
+    infrastructure_damage_loss_table_path: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Model urban flood risk mitigation by green infrastructure.
+
+    Computes peak flow attenuation for each pixel using curve numbers, delineates
+    benefiting areas, and optionally calculates avoided damage to built infrastructure.
+
+    Args:
+        aoi_watersheds_path: Path to (sub)watersheds or sewersheds shapefile.
+        rainfall_depth: Depth of rainfall for the 24-hour design storm event (mm).
+        lulc_path: Path to land use/land cover raster.
+        soils_hydrological_group_raster_path: Path to soil hydrologic group
+            raster (values 1=A, 2=B, 3=C, 4=D).
+        curve_number_table_path: Path to CSV with columns lucode, CN_A, CN_B,
+            CN_C, CN_D.
+        built_infrastructure_vector_path: Path to built infrastructure
+            footprints vector with a 'Type' integer field. (optional)
+        infrastructure_damage_loss_table_path: Path to CSV with 'Type' and
+            'Damage' (currency/m²) columns. (optional; required with
+            built_infrastructure_vector_path)
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.urban_flood_risk_mitigation
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "urban_flood"))
+    args = {
+        "aoi_watersheds_path":                aoi_watersheds_path,
+        "rainfall_depth":                     rainfall_depth,
+        "lulc_path":                          lulc_path,
+        "soils_hydrological_group_raster_path": soils_hydrological_group_raster_path,
+        "curve_number_table_path":            curve_number_table_path,
+        "workspace_dir":                      ws,
+        "results_suffix":                     results_suffix,
+    }
+    if clean_optional(built_infrastructure_vector_path):
+        args["built_infrastructure_vector_path"] = built_infrastructure_vector_path
+    if clean_optional(infrastructure_damage_loss_table_path):
+        args["infrastructure_damage_loss_table_path"] = infrastructure_damage_loss_table_path
+
+    return run_invest_model(
+        "Urban Flood Risk Mitigation", natcap.invest.urban_flood_risk_mitigation, args, ws
+    )
+
+
+# ========================================================================
+# 21. Urban Nature Access
+# ========================================================================
+@mcp.tool()
+def run_urban_nature_access(
+    lulc_raster_path: str,
+    lulc_attribute_table: str,
+    population_raster_path: str,
+    admin_boundaries_vector_path: str,
+    search_radius_mode: str,
+    decay_function: str,
+    urban_nature_demand: float = 100.0,
+    search_radius: float = 0.0,
+    population_group_radii_table: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Quantify resident access to urban nature (green/blue spaces).
+
+    Measures proximity-weighted supply of urban nature relative to population,
+    supporting equitable urban planning analysis.
+
+    Args:
+        lulc_raster_path: Path to LULC raster (linearly projected, meters).
+        lulc_attribute_table: Path to CSV with columns lucode, urban_nature
+            (proportion 0–1), and optionally search_radius_m.
+        population_raster_path: Path to population raster (people per pixel,
+            linearly projected, meters).
+        admin_boundaries_vector_path: Path to administrative boundaries
+            polygon vector for aggregating results.
+        search_radius_mode: One of 'RADIUS_OPT_UNIFORM',
+            'RADIUS_OPT_URBAN_NATURE', or 'RADIUS_OPT_POP_GROUP'.
+        decay_function: Distance decay kernel — one of the keys in KERNEL_TYPES
+            (e.g. 'gaussian', 'linear', 'dichotomy').
+        urban_nature_demand: Required urban nature per capita in m². Default: 100.
+        search_radius: Uniform search radius in meters (required when
+            search_radius_mode='RADIUS_OPT_UNIFORM'). Default: 0.
+        population_group_radii_table: Path to CSV mapping population group
+            fieldnames to search radii. (optional; required for POP_GROUP mode)
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.urban_nature_access
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "urban_nature_access"))
+    args = {
+        "lulc_raster_path":             lulc_raster_path,
+        "lulc_attribute_table":         lulc_attribute_table,
+        "population_raster_path":       population_raster_path,
+        "admin_boundaries_vector_path": admin_boundaries_vector_path,
+        "search_radius_mode":           search_radius_mode,
+        "decay_function":               decay_function,
+        "urban_nature_demand":          urban_nature_demand,
+        "workspace_dir":                ws,
+        "results_suffix":               results_suffix,
+    }
+    if search_radius > 0:
+        args["search_radius"] = search_radius
+    if clean_optional(population_group_radii_table):
+        args["population_group_radii_table"] = population_group_radii_table
+
+    return run_invest_model("Urban Nature Access", natcap.invest.urban_nature_access, args, ws)
+
+
+# ========================================================================
+# 22. Urban Stormwater Retention
+# ========================================================================
+@mcp.tool()
+def run_urban_stormwater(
+    lulc_path: str,
+    soil_group_path: str,
+    precipitation_path: str,
+    biophysical_table: str,
+    adjust_retention_ratios: bool = False,
+    retention_radius: float = 0.0,
+    road_centerlines_path: str = "",
+    aggregate_areas_path: str = "",
+    replacement_cost: float = 0.0,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Model urban stormwater retention, runoff, and water quality benefits.
+
+    Computes retention ratios, runoff volumes, and pollutant loading per pixel
+    and aggregated by watershed. Optionally values retained stormwater.
+
+    Args:
+        lulc_path: Path to LULC raster.
+        soil_group_path: Path to soil group raster (values 1=A, 2=B, 3=C, 4=D).
+        precipitation_path: Path to total annual precipitation raster (mm).
+        biophysical_table: Path to biophysical CSV with lucode, EMC values,
+            retention (RC) and percolation (PE) coefficients per soil group,
+            and 'is_connected' if adjust_retention_ratios=True.
+        adjust_retention_ratios: If True, reduce retention near roads. Default: False.
+        retention_radius: Radius for road-adjustment algorithm (meters;
+            required when adjust_retention_ratios=True).
+        road_centerlines_path: Path to road centerlines vector (required
+            when adjust_retention_ratios=True).
+        aggregate_areas_path: Path to polygon vector for aggregating results. (optional)
+        replacement_cost: Cost per m³ of retained stormwater (currency; optional).
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.stormwater
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "urban_stormwater"))
+    args = {
+        "lulc_path":                  lulc_path,
+        "soil_group_path":            soil_group_path,
+        "precipitation_path":         precipitation_path,
+        "biophysical_table":          biophysical_table,
+        "adjust_retention_ratios":    adjust_retention_ratios,
+        "workspace_dir":              ws,
+        "results_suffix":             results_suffix,
+    }
+    if adjust_retention_ratios:
+        args["retention_radius"] = retention_radius
+        if clean_optional(road_centerlines_path):
+            args["road_centerlines_path"] = road_centerlines_path
+    if clean_optional(aggregate_areas_path):
+        args["aggregate_areas_path"] = aggregate_areas_path
+    if replacement_cost > 0:
+        args["replacement_cost"] = replacement_cost
+
+    return run_invest_model("Urban Stormwater Retention", natcap.invest.stormwater, args, ws)
+
+
+# ========================================================================
+# 23. Wave Energy Production
+# ========================================================================
+@mcp.tool()
+def run_wave_energy(
+    machine_perf_path: str,
+    machine_param_path: str,
+    wave_base_data_path: str,
+    dem_path: str,
+    aoi_path: str = "",
+    valuation_container: bool = False,
+    land_gridPts_path: str = "",
+    machine_econ_path: str = "",
+    number_of_machines: int = 28,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Estimate wave energy production and net present value.
+
+    Executes both the biophysical and valuation components of the Wave Energy
+    Model (WEM) to produce wave power, capacity, and NPV rasters.
+
+    Args:
+        machine_perf_path: Path to wave energy machine performance table CSV
+            (capture width vs. wave period and height).
+        machine_param_path: Path to machine parameters CSV (dimensions, rated
+            capacity).
+        wave_base_data_path: Path to the wave base data directory containing
+            WAVEWATCH III global wave data.
+        dem_path: Path to Global Digital Elevation Model (DEM) raster.
+        aoi_path: Path to AOI polygon vector (required for valuation; clips
+            analysis to a more detailed area within the wave data extent).
+        valuation_container: If True, run economic valuation (requires
+            land_gridPts_path and machine_econ_path). Default: False.
+        land_gridPts_path: Path to CSV with landing and power grid connection
+            points (required for valuation).
+        machine_econ_path: Path to machine economic parameters CSV (required
+            for valuation).
+        number_of_machines: Number of wave energy machines per farm site
+            (required for valuation). Default: 28.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.wave_energy
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "wave_energy"))
+    args = {
+        "machine_perf_path":  machine_perf_path,
+        "machine_param_path": machine_param_path,
+        "wave_base_data_path": wave_base_data_path,
+        "dem_path":            dem_path,
+        "workspace_dir":       ws,
+        "results_suffix":      results_suffix,
+    }
+    if clean_optional(aoi_path):
+        args["aoi_path"] = aoi_path
+    if valuation_container:
+        args["valuation_container"] = True
+        args["number_of_machines"]  = number_of_machines
+        if clean_optional(land_gridPts_path):
+            args["land_gridPts_path"] = land_gridPts_path
+        if clean_optional(machine_econ_path):
+            args["machine_econ_path"] = machine_econ_path
+
+    return run_invest_model("Wave Energy Production", natcap.invest.wave_energy, args, ws)
+
+
+# ========================================================================
+# 24. Offshore Wind Energy Production
+# ========================================================================
+@mcp.tool()
+def run_offshore_wind_energy(
+    wind_data_path: str,
+    aoi_vector_path: str,
+    bathymetry_path: str,
+    land_polygon_vector_path: str,
+    global_wind_parameters_path: str,
+    turbine_parameters_path: str,
+    number_of_turbines: int,
+    min_depth: float = 3.0,
+    max_depth: float = 60.0,
+    min_distance: float = 0.0,
+    max_distance: float = 200000.0,
+    valuation_container: bool = False,
+    avg_grid_distance: float = 4.0,
+    grid_points_path: str = "",
+    land_points_path: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Map offshore wind energy potential and estimate energy production and NPV.
+
+    Estimates wind power density, capacity factors, and net present value
+    for offshore wind farms across a bathymetric domain.
+
+    Args:
+        wind_data_path: Path to wind data CSV with headers LONG, LATI, LAM
+            (scale), K (shape), REF (reference height).
+        aoi_vector_path: Path to AOI polygon vector projected in meters.
+        bathymetry_path: Path to bathymetry raster (negative = depth in meters).
+        land_polygon_vector_path: Path to land polygon vector for computing
+            distance-to-shore.
+        global_wind_parameters_path: Path to global wind parameters CSV
+            (turbine and financial defaults).
+        turbine_parameters_path: Path to turbine parameters CSV (hub height,
+            rotor radius, rated capacity, and valuation parameters).
+        number_of_turbines: Number of turbines in the wind farm (required for valuation).
+        min_depth: Minimum water depth for installation (meters). Default: 3.
+        max_depth: Maximum water depth for installation (meters). Default: 60.
+        min_distance: Minimum distance from shore (meters). Default: 0.
+        max_distance: Maximum distance from shore (meters). Default: 200 000.
+        valuation_container: If True, run economic valuation. Default: False.
+        avg_grid_distance: Average distance to grid connection (km; used
+            when grid_points_path is not provided). Default: 4.
+        grid_points_path: Path to CSV with grid/landing connection points. (optional)
+        land_points_path: Path to CSV with land connection points. (optional)
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to all output filenames.
+    """
+    import natcap.invest.wind_energy
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "offshore_wind_energy"))
+    args = {
+        "wind_data_path":              wind_data_path,
+        "aoi_vector_path":             aoi_vector_path,
+        "bathymetry_path":             bathymetry_path,
+        "land_polygon_vector_path":    land_polygon_vector_path,
+        "global_wind_parameters_path": global_wind_parameters_path,
+        "turbine_parameters_path":     turbine_parameters_path,
+        "number_of_turbines":          number_of_turbines,
+        "min_depth":                   min_depth,
+        "max_depth":                   max_depth,
+        "min_distance":                min_distance,
+        "max_distance":                max_distance,
+        "valuation_container":         valuation_container,
+        "avg_grid_distance":           avg_grid_distance,
+        "workspace_dir":               ws,
+        "results_suffix":              results_suffix,
+    }
+    if clean_optional(grid_points_path):
+        args["grid_points_path"] = grid_points_path
+    if clean_optional(land_points_path):
+        args["land_points_path"] = land_points_path
+
+    return run_invest_model("Offshore Wind Energy", natcap.invest.wind_energy, args, ws)
 
 
 # ========================================================================
 # Entry point
 # ========================================================================
+_TOOL_COUNT = 25        # InVEST model tools (incl. CBC preprocessor)
+_DISC_COUNT = 3         # discovery tools: list_models, list_sample_data, get_sample_args
+_TOTAL      = _TOOL_COUNT + _DISC_COUNT
+
+
+def main() -> None:
+    """Start the InVEST MCP server.
+
+    Transport is selected by --transport flag or the INVEST_MCP_TRANSPORT env var:
+
+      stdio  — VS Code / Claude Code / Claude Desktop integration.
+               The MCP client launches this process as a subprocess and
+               communicates over stdin/stdout.  No port needed.
+
+      sse    — Network server (default).  Useful for running the server
+               once and connecting multiple clients, or for remote access.
+               Listens on INVEST_MCP_PORT (default 54320).
+
+    Usage:
+        python server.py                    # SSE on port 54320
+        python server.py --transport stdio  # stdio for VS Code
+        invest-mcp --transport stdio        # same via entry point
+    """
+    import argparse as _ap
+    parser = _ap.ArgumentParser(description="InVEST MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["sse", "stdio"],
+        default=os.getenv("INVEST_MCP_TRANSPORT", "sse"),
+        help="Transport: 'stdio' for VS Code/Claude Code, 'sse' for network (default: sse)",
+    )
+    a, _ = parser.parse_known_args()
+
+    if a.transport == "stdio":
+        logger.info("Starting InVEST MCP Server (stdio, %d tools)", _TOTAL)
+        mcp.run(transport="stdio")
+    else:
+        port = int(os.getenv("INVEST_MCP_PORT", 54320))
+        logger.info(
+            "Starting InVEST MCP Server on port %d  (%d tools: %d InVEST models + %d discovery)",
+            port, _TOTAL, _TOOL_COUNT, _DISC_COUNT,
+        )
+        mcp.settings.port = port
+        mcp.run(transport="sse")
+
+
 if __name__ == "__main__":
-    port = int(os.getenv("INVEST_MCP_PORT", 54320))
-    logger.info(f"Starting InVEST MCP Server on port {port} with 16 tools (13 models + list_models + list_sample_data + get_sample_args)")
-    mcp.settings.port = port
-    mcp.run(transport="sse")
+    main()

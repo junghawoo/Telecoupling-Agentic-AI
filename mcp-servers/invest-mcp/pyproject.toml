@@ -1,0 +1,45 @@
+[project]
+name = "invest-mcp-server"
+version = "1.0.0"
+description = "NatCap InVEST environmental models exposed as a standalone MCP server"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    # MCP framework
+    "mcp[cli]>=1.0",
+    # Environment / config
+    "python-dotenv>=1.0",
+    # Docs scraper (fetch_invest_docs.py) — optional at runtime
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+]
+
+# !! natcap.invest and GDAL are NOT listed here on purpose !!
+#
+# They must be installed via conda BEFORE running  pip install -e .
+# because GDAL's Python bindings require a matching libgdal C library,
+# which pip cannot manage.  conda-forge handles this correctly.
+#
+#   conda install -c conda-forge natcap.invest
+#
+# Running  pip install natcap.invest  will almost always fail.
+
+[project.scripts]
+# Run the MCP server directly:  invest-mcp
+invest-mcp = "server:main"
+
+[build-system]
+# setuptools.build_meta works with any setuptools >= 45 (the universal backend).
+# Avoid setuptools.backends.legacy which requires setuptools >= 69.
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+# Flat layout: server.py and utils.py are standalone modules, not a package.
+[tool.setuptools]
+py-modules = ["server", "utils"]
+
+# ── Dev tooling ────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"

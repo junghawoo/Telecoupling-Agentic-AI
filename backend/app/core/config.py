@@ -41,6 +41,23 @@ class Settings(BaseSettings):
     workspace_dir: str = "./data/outputs"
     upload_dir: str = "./data/uploads"
 
+    # --- InVEST Model Data (crop production models need this) ---
+    # Set MODEL_DATA_PATH in .env to the InVEST model-data directory, e.g.:
+    #   MODEL_DATA_PATH=/path/to/invest-model-data
+    # Download from: https://storage.googleapis.com/releases.naturalcapitalproject.org/invest/3.14.0/InVEST_3.14.0_model_data.zip
+    model_data_path: str = ""
+
+    # --- Tool Output ---
+    # Base directory under which generate_output_dir() creates per-session subfolders.
+    # Defaults to the same place as invest_output_dir for consistency.
+    output_base_dir: str = "./data/outputs"
+
+    # --- R Integration ---
+    # Absolute path to the Rscript binary, or just "Rscript" if it is on PATH.
+    # Set R_EXECUTABLE in .env if Rscript is not on PATH, e.g.:
+    #   R_EXECUTABLE=/usr/local/bin/Rscript
+    r_executable: str = "Rscript"
+
     # --- Logging ---
     log_level: str = "INFO"
 
