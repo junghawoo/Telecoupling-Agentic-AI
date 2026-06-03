@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -1914,9 +1915,198 @@ def run_offshore_wind_energy(
 
 
 # ========================================================================
+# 25. Network Analysis
+# ========================================================================
+@mcp.tool()
+def run_network_analysis(
+    nodes_csv: str,
+    links_csv: str,
+    node_id_col: str = "CODE",
+    source_col: str = "sender",
+    target_col: str = "receiver",
+    weight_col: str = "",
+    node_attr_cols: str = "",
+    top_n: int = 10,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Run network (graph) analysis on a directed weighted flow network.
+
+    Computes node-level centrality metrics, community detection, and overall
+    network statistics, then writes outputs to CSV files.
+
+    Args:
+        nodes_csv: Path to a CSV with one row per node. Must contain
+            node_id_col (default 'CODE') plus any optional attribute columns.
+        links_csv: Path to a CSV with one row per directed edge. Must contain
+            source_col and target_col. Optionally a weight_col.
+        node_id_col: Column in nodes_csv with unique node identifiers. Default: 'CODE'.
+        source_col: Column in links_csv for edge source node. Default: 'sender'.
+        target_col: Column in links_csv for edge target node. Default: 'receiver'.
+        weight_col: Column in links_csv for edge weight (optional). Leave empty
+            to treat all edges as unweighted.
+        node_attr_cols: Comma-separated list of extra node attribute columns
+            from nodes_csv to include in the output (e.g. 'larrivals.sender,larrivals.receiver').
+        top_n: Number of top nodes to report per centrality metric. Default: 10.
+        workspace_dir: Output directory (auto-created if empty).
+        results_suffix: Suffix appended to output filenames.
+    """
+    import networkx as nx
+    import pandas as pd
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "network_analysis"))
+    start_time = time.time()
+    logger.info("Starting Network Analysis in %s", ws)
+
+    try:
+        # ── Load data ────────────────────────────────────────────────────────
+        nodes_df = pd.read_csv(nodes_csv)
+        links_df = pd.read_csv(links_csv)
+
+        logger.info("Nodes: %d  |  Edges: %d", len(nodes_df), len(links_df))
+
+        # ── Build directed graph ─────────────────────────────────────────────
+        G = nx.DiGraph()
+
+        # Add nodes with attributes
+        extra_cols = [c.strip() for c in node_attr_cols.split(",") if c.strip()] if node_attr_cols else []
+        for _, row in nodes_df.iterrows():
+            attrs = {c: row[c] for c in extra_cols if c in nodes_df.columns}
+            G.add_node(str(row[node_id_col]), **attrs)
+
+        # Add edges
+        use_weight = bool(clean_optional(weight_col)) and weight_col in links_df.columns
+        for _, row in links_df.iterrows():
+            src, tgt = str(row[source_col]), str(row[target_col])
+            if use_weight:
+                G.add_edge(src, tgt, weight=float(row[weight_col]))
+            else:
+                G.add_edge(src, tgt)
+
+        # ── Global stats ─────────────────────────────────────────────────────
+        n_nodes = G.number_of_nodes()
+        n_edges = G.number_of_edges()
+        density = nx.density(G)
+        is_weakly_connected = nx.is_weakly_connected(G)
+        n_weakly_cc = nx.number_weakly_connected_components(G)
+        n_strongly_cc = nx.number_strongly_connected_components(G)
+        avg_in  = sum(d for _, d in G.in_degree())  / n_nodes
+        avg_out = sum(d for _, d in G.out_degree()) / n_nodes
+        reciprocity = nx.reciprocity(G)
+
+        global_stats = {
+            "nodes": n_nodes,
+            "edges": n_edges,
+            "density": round(density, 6),
+            "is_weakly_connected": is_weakly_connected,
+            "weakly_connected_components": n_weakly_cc,
+            "strongly_connected_components": n_strongly_cc,
+            "avg_in_degree": round(avg_in, 4),
+            "avg_out_degree": round(avg_out, 4),
+            "reciprocity": round(reciprocity, 4),
+        }
+
+        # ── Centrality metrics ───────────────────────────────────────────────
+        in_deg   = dict(G.in_degree())
+        out_deg  = dict(G.out_degree())
+        in_str   = {n: sum(d["weight"] for _, _, d in G.in_edges(n, data=True) if "weight" in d)
+                    for n in G.nodes()} if use_weight else {}
+        out_str  = {n: sum(d["weight"] for _, _, d in G.out_edges(n, data=True) if "weight" in d)
+                    for n in G.nodes()} if use_weight else {}
+
+        betweenness = nx.betweenness_centrality(G, weight="weight" if use_weight else None, normalized=True)
+        pagerank    = nx.pagerank(G, weight="weight" if use_weight else None)
+
+        # ── Community detection on undirected projection ─────────────────────
+        UG = G.to_undirected()
+        communities = list(nx.community.greedy_modularity_communities(UG, weight="weight" if use_weight else None))
+        community_map = {}
+        for i, comm in enumerate(communities):
+            for node in comm:
+                community_map[node] = i
+        modularity = nx.community.modularity(UG, communities, weight="weight" if use_weight else None)
+
+        # ── Build per-node results dataframe ─────────────────────────────────
+        rows = []
+        for node in G.nodes():
+            row = {
+                "node": node,
+                "in_degree": in_deg.get(node, 0),
+                "out_degree": out_deg.get(node, 0),
+                "betweenness_centrality": round(betweenness.get(node, 0), 6),
+                "pagerank": round(pagerank.get(node, 0), 6),
+                "community": community_map.get(node, -1),
+            }
+            if use_weight:
+                row["in_strength"]  = round(in_str.get(node, 0), 4)
+                row["out_strength"] = round(out_str.get(node, 0), 4)
+            # Attach requested node attributes
+            node_attrs = G.nodes[node]
+            for c in extra_cols:
+                row[c] = node_attrs.get(c, None)
+            rows.append(row)
+
+        metrics_df = pd.DataFrame(rows).sort_values("betweenness_centrality", ascending=False)
+
+        # ── Write outputs ────────────────────────────────────────────────────
+        suf = results_suffix
+        metrics_path = os.path.join(ws, f"node_metrics{suf}.csv")
+        metrics_df.to_csv(metrics_path, index=False)
+
+        # Top-N tables
+        top_betweenness = metrics_df.nlargest(top_n, "betweenness_centrality")[["node", "betweenness_centrality", "community"]].to_dict("records")
+        top_pagerank    = metrics_df.nlargest(top_n, "pagerank")[["node", "pagerank", "community"]].to_dict("records")
+        top_in_degree   = metrics_df.nlargest(top_n, "in_degree")[["node", "in_degree"]].to_dict("records")
+        top_out_degree  = metrics_df.nlargest(top_n, "out_degree")[["node", "out_degree"]].to_dict("records")
+
+        # Community summary
+        community_summary = []
+        for i, comm in enumerate(communities):
+            community_summary.append({"community_id": i, "size": len(comm), "members": sorted(comm)})
+        community_df = pd.DataFrame(community_summary)
+        community_path = os.path.join(ws, f"communities{suf}.csv")
+        community_df.to_csv(community_path, index=False)
+
+        elapsed = round(time.time() - start_time, 2)
+        logger.info("Network Analysis completed in %ss", elapsed)
+
+        result = {
+            "status": "success",
+            "model": "Network Analysis",
+            "workspace_dir": ws,
+            "elapsed_seconds": elapsed,
+            "global_stats": global_stats,
+            "community_modularity": round(modularity, 4),
+            "n_communities": len(communities),
+            "top_betweenness": top_betweenness,
+            "top_pagerank": top_pagerank,
+            "top_in_degree": top_in_degree,
+            "top_out_degree": top_out_degree,
+            "output_files": [
+                os.path.relpath(metrics_path, ws),
+                os.path.relpath(community_path, ws),
+            ],
+        }
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        elapsed = round(time.time() - start_time, 2)
+        logger.error("Network Analysis failed after %ss: %s", elapsed, e)
+        result = {
+            "status": "error",
+            "model": "Network Analysis",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "elapsed_seconds": elapsed,
+            "workspace_dir": ws,
+        }
+        return json.dumps(result, indent=2)
+
+
+# ========================================================================
 # Entry point
 # ========================================================================
-_TOOL_COUNT = 25        # InVEST model tools (incl. CBC preprocessor)
+_TOOL_COUNT = 26        # InVEST model tools (incl. CBC preprocessor + network analysis)
 _DISC_COUNT = 3         # discovery tools: list_models, list_sample_data, get_sample_args
 _TOTAL      = _TOOL_COUNT + _DISC_COUNT
 
@@ -1961,6 +2151,1417 @@ def main() -> None:
         mcp.settings.port = port
         mcp.run(transport="sse")
 
+
+
+# ============================================================
+# AUTO-GENERATED by nan_to_mcp.py
+# Source: /Users/junghawoo/Documents/Telecoupling_Nan/tools
+# Run `python nan_to_mcp.py --help` to regenerate.
+# Review all ⚠ sections before deploying.
+# ============================================================
+
+# ====================================================================
+# Add Agents Interactively
+# (auto-generated from add_agents.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_add_agents_interactively(
+    input_csv: str,
+    x_field: str,
+    y_field: str,
+    name_field: str = "Name",
+    text_field: str = "",
+    crs: str = "EPSG:4326",
+) -> str:
+    """from a CSV table with Name, X (longitude), Y (latitude), and optional
+    Text/description columns. Replaces the ArcGIS interactive click-to-
+    place workflow: user provides coordinates in CSV.
+
+    Args:
+        input_csv: Input Csv
+        x_field: X Field
+        y_field: Y Field
+        name_field: Name Field
+        text_field: Text Field
+        crs: Crs
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "x_field": x_field,
+        "y_field": y_field,
+        "name_field": name_field,
+        "text_field": text_field,
+        "crs": crs,
+    }
+
+    _mod = _imp.import_module("add_agents")
+    _fn  = getattr(_mod, "run_add_agents_interactively")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Add Agents Interactively", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Add Agents Interactively", _e)
+        return json.dumps({"status": "error", "model": "Add Agents Interactively", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Add Causes Interactively
+# (auto-generated from add_causes.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_add_causes_interactively(
+    input_csv: str,
+    x_field: str,
+    y_field: str,
+    description_field: str = "DESCRIPTION",
+    crs: str = "EPSG:4326",
+) -> str:
+    """telecoupling causes (drivers) from a CSV with coordinates and description
+    fields.
+
+    Args:
+        input_csv: Input Csv
+        x_field: X Field
+        y_field: Y Field
+        description_field: Description Field
+        crs: Crs
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "x_field": x_field,
+        "y_field": y_field,
+        "description_field": description_field,
+        "crs": crs,
+    }
+
+    _mod = _imp.import_module("add_causes")
+    _fn  = getattr(_mod, "run_add_causes_interactively")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Add Causes Interactively", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Add Causes Interactively", _e)
+        return json.dumps({"status": "error", "model": "Add Causes Interactively", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Add Media Flows
+# (auto-generated from add_media_flows.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_add_media_flows(
+    html_file: str,
+    country_reference_csv: str,
+    source_lon: str,
+    source_lat: str,
+    source_name: str = "Source",
+    crs: str = "EPSG:4326",
+    min_mentions: int = 1,
+) -> str:
+    """compute mention frequencies, and generate flow lines from a source point to
+    each mentioned location. Requires: a country reference CSV (with iso3,
+    country_name, lon, lat) and an HTML file.
+
+    Args:
+        html_file: Html File
+        country_reference_csv: Country Reference Csv
+        source_lon: Source Lon
+        source_lat: Source Lat
+        source_name: Source Name
+        crs: Crs
+        min_mentions: Min Mentions
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "html_file": html_file,
+        "country_reference_csv": country_reference_csv,
+        "source_lon": source_lon,
+        "source_lat": source_lat,
+        "source_name": source_name,
+        "crs": crs,
+        "min_mentions": min_mentions,
+    }
+
+    _mod = _imp.import_module("add_media_flows")
+    _fn  = getattr(_mod, "run_add_media_flows")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Add Media Flows", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Add Media Flows", _e)
+        return json.dumps({"status": "error", "model": "Add Media Flows", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Add Systems Interactively
+# (auto-generated from add_systems.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_add_systems_interactively(
+    input_csv: str,
+    x_field: str,
+    y_field: str,
+    name_field: str = "Name",
+    crs: str = "EPSG:4326",
+) -> str:
+    """systems (sending/receiving/spillover) from a CSV with Name, X, Y columns.
+
+    Args:
+        input_csv: Input Csv
+        x_field: X Field
+        y_field: Y Field
+        name_field: Name Field
+        crs: Crs
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "x_field": x_field,
+        "y_field": y_field,
+        "name_field": name_field,
+        "crs": crs,
+    }
+
+    _mod = _imp.import_module("add_systems")
+    _fn  = getattr(_mod, "run_add_systems_interactively")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Add Systems Interactively", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Add Systems Interactively", _e)
+        return json.dumps({"status": "error", "model": "Add Systems Interactively", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Carbon
+# (auto-generated from carbon.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_carbon(
+    lulc_cur_path: str,
+    carbon_pools_path: str,
+    lulc_fut_path: str = "",
+    do_redd: bool = False,
+    lulc_redd_path: str = "",
+    do_valuation: bool = False,
+    lulc_cur_year: int = 0,
+    lulc_fut_year: int = 0,
+    price_per_metric_ton_of_c: float = 0,
+    discount_rate: float = 0,
+    rate_change: float = 0,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Minimum required: lulc_cur_path + carbon_pools_path.
+
+    Args:
+        lulc_cur_path: Path to current land use/land cover raster
+        carbon_pools_path: Path to carbon pools file
+        lulc_fut_path: Path to future land use/land cover raster (optional)
+            (triggers sequestration; lulc_redd_path triggers REDD scenario;
+            do_valuation requires lulc_cur_year)
+        do_redd: If True, redd
+        lulc_redd_path: Path to lulc redd file
+        do_valuation: If True, valuation
+        lulc_cur_year: Optional int, default 0
+        lulc_fut_year: Optional int, default 0
+        price_per_metric_ton_of_c: Optional float, default 0
+        discount_rate: Annual discount rate applied to future carbon value (percent)
+        rate_change: Optional float, default 0
+        workspace_dir: Output directory (auto-created if empty)
+        results_suffix: Suffix appended to all output filenames
+    """
+    import natcap.invest.carbon
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "carbon"))
+    args = {
+        "lulc_cur_path": lulc_cur_path,
+        "carbon_pools_path": carbon_pools_path,
+        "lulc_fut_path": lulc_fut_path,
+        "do_redd": do_redd,
+        "lulc_redd_path": lulc_redd_path,
+        "do_valuation": do_valuation,
+        "lulc_cur_year": lulc_cur_year,
+        "lulc_fut_year": lulc_fut_year,
+        "price_per_metric_ton_of_c": price_per_metric_ton_of_c,
+        "discount_rate": discount_rate,
+        "rate_change": rate_change,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Carbon", natcap.invest.carbon, args, ws)
+
+
+# ====================================================================
+# Co2 Emissions
+# (auto-generated from co2_emissions.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_co2_emissions(
+    input_csv: str,
+    capacity_per_trip: str,
+    co2_per_km_per_trip: str,
+    animal_count_field: str = "animal_count",
+    length_km_field: str = "length_km",
+    id_field: str = "",
+) -> str:
+    """User provides a CSV with transport route data. Tool computes total CO2
+    emissions per route based on: length × trips_needed ×
+    emission_factor_per_km_per_trip.
+
+    Args:
+        input_csv: Input Csv
+        capacity_per_trip: Capacity Per Trip
+        co2_per_km_per_trip: Co2 Per Km Per Trip
+        animal_count_field: Animal Count Field
+        length_km_field: Length Km Field
+        id_field: Id Field
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "capacity_per_trip": capacity_per_trip,
+        "co2_per_km_per_trip": co2_per_km_per_trip,
+        "animal_count_field": animal_count_field,
+        "length_km_field": length_km_field,
+        "id_field": id_field,
+    }
+
+    _mod = _imp.import_module("co2_emissions")
+    _fn  = getattr(_mod, "run_co2_emissions")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Co2 Emissions", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Co2 Emissions", _e)
+        return json.dumps({"status": "error", "model": "Co2 Emissions", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Commodity Trade
+# (auto-generated from commodity_trade.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_commodity_trade(
+    trade_csv: str,
+    from_country_field: str,
+    to_country_field: str,
+    value_field: str,
+    year_field: int = 0,
+    year: int = 0,
+    centroids_csv: str = "",
+    crs: str = "EPSG:4326",
+    top_n_partners: int = 0,
+) -> str:
+    """Outputs flow lines (GeoJSON) and a summary table. User provides a trade CSV
+    with from/to country codes and a country centroids CSV (or we use a
+    built-in world centroids lookup).
+
+    Args:
+        trade_csv: Trade Csv
+        from_country_field: From Country Field
+        to_country_field: To Country Field
+        value_field: Value Field
+        year_field: Year Field
+        year: Year
+        centroids_csv: Centroids Csv
+        crs: Crs
+        top_n_partners: Top N Partners
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "trade_csv": trade_csv,
+        "from_country_field": from_country_field,
+        "to_country_field": to_country_field,
+        "value_field": value_field,
+        "year_field": year_field,
+        "year": year,
+        "centroids_csv": centroids_csv,
+        "crs": crs,
+        "top_n_partners": top_n_partners,
+    }
+
+    _mod = _imp.import_module("commodity_trade")
+    _fn  = getattr(_mod, "run_commodity_trade")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Commodity Trade", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Commodity Trade", _e)
+        return json.dumps({"status": "error", "model": "Commodity Trade", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Cost Benefit Analysis
+# (auto-generated from cost_benefit_analysis.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_cost_benefit_analysis(
+    input_csv: str,
+    economic_data_csv: str,
+    key_field: str,
+    cost_field: str = "COSTS",
+    revenue_field: str = "REVENUES",
+) -> str:
+    """and compute net returns (RETURNS = REVENUES - COSTS).
+
+    Args:
+        input_csv: Input Csv
+        economic_data_csv: Economic Data Csv
+        key_field: Key Field
+        cost_field: Cost Field
+        revenue_field: Revenue Field
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "economic_data_csv": economic_data_csv,
+        "key_field": key_field,
+        "cost_field": cost_field,
+        "revenue_field": revenue_field,
+    }
+
+    _mod = _imp.import_module("cost_benefit_analysis")
+    _fn  = getattr(_mod, "run_cost_benefit_analysis")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Cost Benefit Analysis", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Cost Benefit Analysis", _e)
+        return json.dumps({"status": "error", "model": "Cost Benefit Analysis", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Crop Percentile
+# (auto-generated from crop_percentile.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+def run_crop_percentile(
+    landcover_raster_path: str,
+    aggregate_polygon_path: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Estimates crop production using globally observed percentile yield
+    datasets, providing 25th, 50th, and 75th percentile production
+    estimates per crop.
+
+    Args:
+        landcover_raster_path: Path to landcover raster
+        aggregate_polygon_path: Path to aggregate polygon file
+        workspace_dir: Output directory (auto-created if empty)
+        results_suffix: Suffix appended to all output filenames
+    """
+    import natcap.invest.crop_production_percentile
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "crop_percentile"))
+    args = {
+        "landcover_raster_path": landcover_raster_path,
+        "aggregate_polygon_path": aggregate_polygon_path,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Crop Percentile", natcap.invest.crop_production_percentile, args, ws)
+
+
+# ====================================================================
+# Crop Regression
+# (auto-generated from crop_regression.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_crop_regression(
+    landcover_raster_path: str,
+    aggregate_polygon_path: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """Supported crops are determined dynamically from:
+    model_data/climate_regression_yield_tables/*_regression_yield_table.csv
+    Crop name matching is normalized (lowercase + remove spaces/hyphens).
+    model_data_path is provided by the user in params.
+
+    Args:
+        landcover_raster_path: Path to landcover raster
+        aggregate_polygon_path: Path to aggregate polygon file
+        workspace_dir: Output directory (auto-created if empty)
+        results_suffix: Suffix appended to all output filenames
+    """
+    import natcap.invest.crop_production_regression
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "crop_regression"))
+    args = {
+        "landcover_raster_path": landcover_raster_path,
+        "aggregate_polygon_path": aggregate_polygon_path,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Crop Regression", natcap.invest.crop_production_regression, args, ws)
+
+
+# ====================================================================
+# Draw Agents From Table
+# (auto-generated from draw_agents_table.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_draw_agents_from_table(
+    input_csv: str,
+    x_field: str,
+    y_field: str,
+    name_field: str = "",
+    crs: str = "EPSG:4326",
+) -> str:
+    """render it as a point feature layer. Functionally equivalent to Add Agents
+    Interactively but intended for batch upload of pre-collected
+    coordinates.
+
+    Args:
+        input_csv: Input Csv
+        x_field: X Field
+        y_field: Y Field
+        name_field: Name Field
+        crs: Crs
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "x_field": x_field,
+        "y_field": y_field,
+        "name_field": name_field,
+        "crs": crs,
+    }
+
+    _mod = _imp.import_module("draw_agents_table")
+    _fn  = getattr(_mod, "run_draw_agents_from_table")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Draw Agents From Table", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Draw Agents From Table", _e)
+        return json.dumps({"status": "error", "model": "Draw Agents From Table", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Draw Systems From Table
+# (auto-generated from draw_systems_table.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_draw_systems_from_table(
+    input_csv: str,
+    x_field: str,
+    y_field: str,
+    crs: str = "EPSG:4326",
+) -> str:
+    """point features. Batch version of Add Systems Interactively.
+
+    Args:
+        input_csv: Input Csv
+        x_field: X Field
+        y_field: Y Field
+        crs: Crs
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "x_field": x_field,
+        "y_field": y_field,
+        "crs": crs,
+    }
+
+    _mod = _imp.import_module("draw_systems_table")
+    _fn  = getattr(_mod, "run_draw_systems_from_table")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Draw Systems From Table", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Draw Systems From Table", _e)
+        return json.dumps({"status": "error", "model": "Draw Systems From Table", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Factor Analysis Mixed Data
+# (auto-generated from famd.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_factor_analysis_mixed_data(
+    input_csv: str,
+    quantitative_variables: str = "",
+    qualitative_variables: str = "",
+    n_components: int = 5,
+    handle_na: bool = True,
+) -> str:
+    """variable types, via R subprocess using FactoMineR package. - Quantitative
+    only → PCA - Qualitative only  → MCA - Mixed             → FAMD Missing
+    values handled by missMDA package if handle_na=True.
+
+    Args:
+        input_csv: Input Csv
+        quantitative_variables: Quantitative Variables
+        qualitative_variables: Qualitative Variables
+        n_components: N Components
+        handle_na: Handle Na
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "quantitative_variables": quantitative_variables,
+        "qualitative_variables": qualitative_variables,
+        "n_components": n_components,
+        "handle_na": handle_na,
+    }
+
+    _mod = _imp.import_module("famd")
+    _fn  = getattr(_mod, "run_factor_analysis_mixed_data")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Factor Analysis Mixed Data", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Factor Analysis Mixed Data", _e)
+        return json.dumps({"status": "error", "model": "Factor Analysis Mixed Data", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Food Security
+# (auto-generated from food_security.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_food_security(
+    fao_csv: str,
+    countries: str,
+    indicator_field: str,
+    country_field: str = "Area",
+    year_field: str = "Year",
+    value_field: str = "Value",
+    unit_field: str = "",
+) -> str:
+    """and generate trend charts (PNG) and summary tables. Adapted from original
+    (removed Earth Engine dependency): user provides FAO CSV data and
+    selects countries and indicators to analyze.
+
+    Args:
+        fao_csv: Fao Csv
+        countries: Countries
+        indicator_field: Indicator Field
+        country_field: Country Field
+        year_field: Year Field
+        value_field: Value Field
+        unit_field: Unit Field
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "fao_csv": fao_csv,
+        "countries": countries,
+        "indicator_field": indicator_field,
+        "country_field": country_field,
+        "year_field": year_field,
+        "value_field": value_field,
+        "unit_field": unit_field,
+    }
+
+    _mod = _imp.import_module("food_security")
+    _fn  = getattr(_mod, "run_food_security")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Food Security", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Food Security", _e)
+        return json.dumps({"status": "error", "model": "Food Security", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Habitat Risk Assessment
+# (auto-generated from hra.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_hra(
+    info_table_path: str,
+    criteria_table_path: str,
+    resolution: float,
+    max_rating: float,
+    n_overlapping_stressors: int,
+    aoi_vector_path: str,
+    visualize_outputs: bool = False,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """risk_eq, decay_eq, n_overlapping_stressors, aoi_vector_path.
+
+    Args:
+        info_table_path: Path to info CSV table
+        criteria_table_path: Path to criteria CSV table
+        resolution: Required float
+        max_rating: Required float
+        n_overlapping_stressors: Required int
+        aoi_vector_path: Path to area of interest vector (optional; clips
+            analysis extent)
+        visualize_outputs: Optional bool, default False
+        workspace_dir: Output directory (auto-created if empty)
+        results_suffix: Suffix appended to all output filenames
+    """
+    import natcap.invest.hra
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "hra"))
+    args = {
+        "info_table_path": info_table_path,
+        "criteria_table_path": criteria_table_path,
+        "resolution": resolution,
+        "max_rating": max_rating,
+        "n_overlapping_stressors": n_overlapping_stressors,
+        "aoi_vector_path": aoi_vector_path,
+        "visualize_outputs": visualize_outputs,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Habitat Risk Assessment", natcap.invest.hra, args, ws)
+
+
+# ====================================================================
+# Nutrient Delivery Ratio
+# (auto-generated from ndr.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_ndr(
+    dem_path: str,
+    lulc_path: str,
+    runoff_proxy_path: str,
+    watersheds_path: str,
+    biophysical_table_path: str,
+    threshold_flow_accumulation: int,
+    k_param: int = 2,
+    calc_n: bool = True,
+    calc_p: bool = False,
+    subsurface_critical_length_n: int = 150,
+    subsurface_eff_n: float = 0.8,
+    subsurface_critical_length_p: int = 150,
+    subsurface_eff_p: float = 0.8,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """biophysical_table_path, threshold_flow_accumulation, k_param. At least one
+    of calc_n or calc_p must be True. Nitrogen optional:
+    subsurface_critical_length_n, subsurface_eff_n. Phosphorus optional:
+    subsurface_critical_length_p, subsurface_eff_p.
+
+    Args:
+        dem_path: Path to Digital Elevation Model (DEM) raster
+        lulc_path: Path to land use/land cover raster
+        runoff_proxy_path: Path to runoff proxy file
+        watersheds_path: Path to watersheds vector (shapefile or GeoPackage)
+        biophysical_table_path: Path to biophysical table CSV mapping LULC
+            codes to model parameters
+        threshold_flow_accumulation: Minimum flow accumulation to define a stream pixel
+        k_param: Optional int, default 2
+        calc_n: If True, n
+        calc_p: If True, p
+        subsurface_critical_length_n: Optional int, default 150
+        subsurface_eff_n: Optional float, default 0.8
+        subsurface_critical_length_p: Optional int, default 150
+        subsurface_eff_p: Optional float, default 0.8
+        workspace_dir: Output directory (auto-created if empty)
+        results_suffix: Suffix appended to all output filenames
+    """
+    import natcap.invest.ndr.ndr
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "ndr"))
+    args = {
+        "dem_path": dem_path,
+        "lulc_path": lulc_path,
+        "runoff_proxy_path": runoff_proxy_path,
+        "watersheds_path": watersheds_path,
+        "biophysical_table_path": biophysical_table_path,
+        "threshold_flow_accumulation": threshold_flow_accumulation,
+        "k_param": k_param,
+        "calc_n": calc_n,
+        "calc_p": calc_p,
+        "subsurface_critical_length_n": subsurface_critical_length_n,
+        "subsurface_eff_n": subsurface_eff_n,
+        "subsurface_critical_length_p": subsurface_critical_length_p,
+        "subsurface_eff_p": subsurface_eff_p,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Nutrient Delivery Ratio", natcap.invest.ndr.ndr, args, ws)
+
+
+# ====================================================================
+# Nutrition Metrics
+# (auto-generated from nutrition_metrics.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_nutrition_metrics(
+    population_csv: str,
+    age_group_field: str = "age_group",
+    sex_field: str = "sex",
+    population_count_field: str = "population",
+    weight_kg_field: float = 0,
+    male_height_cm: int = 170,
+    female_height_cm: int = 158,
+) -> str:
+    """FAO nutritional formulas applied to population data by age group and sex.
+    Adapted from original (removed ArcGIS/WorldPop raster dependency): user
+    provides a population CSV with columns for age group, sex, and count.
+
+    Args:
+        population_csv: Population Csv
+        age_group_field: Age Group Field
+        sex_field: Sex Field
+        population_count_field: Population Count Field
+        weight_kg_field: Weight Kg Field
+        male_height_cm: Male Height Cm
+        female_height_cm: Female Height Cm
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "population_csv": population_csv,
+        "age_group_field": age_group_field,
+        "sex_field": sex_field,
+        "population_count_field": population_count_field,
+        "weight_kg_field": weight_kg_field,
+        "male_height_cm": male_height_cm,
+        "female_height_cm": female_height_cm,
+    }
+
+    _mod = _imp.import_module("nutrition_metrics")
+    _fn  = getattr(_mod, "run_nutrition_metrics")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Nutrition Metrics", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Nutrition Metrics", _e)
+        return json.dumps({"status": "error", "model": "Nutrition Metrics", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Ols
+# (auto-generated from ols.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_ols(
+    input_csv: str,
+    independent_variables: str,
+    dependent_variable: str,
+    model_selection: bool = False,
+    min_r2: float = 0.5,
+    max_vif: float = 7.5,
+    max_p_value: float = 0.05,
+) -> str:
+    """Accepts a CSV file. User specifies dependent and independent variable
+    column names. Optional model_selection mode tests all variable
+    combinations and ranks by R².
+
+    Args:
+        input_csv: Input Csv
+        independent_variables: Independent Variables
+        dependent_variable: Dependent Variable
+        model_selection: Model Selection
+        min_r2: Min R2
+        max_vif: Max Vif
+        max_p_value: Max P Value
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "independent_variables": independent_variables,
+        "dependent_variable": dependent_variable,
+        "model_selection": model_selection,
+        "min_r2": min_r2,
+        "max_vif": max_vif,
+        "max_p_value": max_p_value,
+    }
+
+    _mod = _imp.import_module("ols")
+    _fn  = getattr(_mod, "run_ols")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Ols", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Ols", _e)
+        return json.dumps({"status": "error", "model": "Ols", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Population Count Density
+# (auto-generated from population_density.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_population_count_density(
+    input_csv: str,
+    population_field: str,
+    area_km2_field: str,
+    unit_id_field: str = "",
+    second_period_csv: str = "",
+    second_period_population_field: str = "",
+) -> str:
+    """and optionally compute population change between two time periods. Input:
+    CSV with reporting unit IDs, population counts, and area (km²).
+    Optional second CSV for time-period comparison.
+
+    Args:
+        input_csv: Input Csv
+        population_field: Population Field
+        area_km2_field: Area Km2 Field
+        unit_id_field: Unit Id Field
+        second_period_csv: Second Period Csv
+        second_period_population_field: Second Period Population Field
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "population_field": population_field,
+        "area_km2_field": area_km2_field,
+        "unit_id_field": unit_id_field,
+        "second_period_csv": second_period_csv,
+        "second_period_population_field": second_period_population_field,
+    }
+
+    _mod = _imp.import_module("population_density")
+    _fn  = getattr(_mod, "run_population_count_density")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Population Count Density", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Population Count Density", _e)
+        return json.dumps({"status": "error", "model": "Population Count Density", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Draw Radial Flows
+# (auto-generated from radial_flows.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_draw_radial_flows(
+    input_csv: str,
+    from_x_field: str,
+    from_y_field: str,
+    to_x_field: str,
+    to_y_field: str,
+    crs: str = "EPSG:4326",
+) -> str:
+    """of origin-destination XY coordinate pairs.
+
+    Args:
+        input_csv: Input Csv
+        from_x_field: From X Field
+        from_y_field: From Y Field
+        to_x_field: To X Field
+        to_y_field: To Y Field
+        crs: Crs
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "input_csv": input_csv,
+        "from_x_field": from_x_field,
+        "from_y_field": from_y_field,
+        "to_x_field": to_x_field,
+        "to_y_field": to_y_field,
+        "crs": crs,
+    }
+
+    _mod = _imp.import_module("radial_flows")
+    _fn  = getattr(_mod, "run_draw_radial_flows")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Draw Radial Flows", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Draw Radial Flows", _e)
+        return json.dumps({"status": "error", "model": "Draw Radial Flows", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Read File
+# (auto-generated from read_file.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_read_file(
+    file_path: str = "",
+) -> str:
+    """read_file — allows the AI to read and analyze output files (CSV, TXT).
+    Returns a text summary that Gemini can use for analysis and Q&A.
+
+    Args:
+        file_path: File Path
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "file_path": file_path,
+    }
+
+    _mod = _imp.import_module("read_file")
+    _fn  = getattr(_mod, "run_read_file")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Read File", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Read File", _e)
+        return json.dumps({"status": "error", "model": "Read File", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Render Tif
+# (auto-generated from render_tif.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+async def run_render_tif(
+    file_path: str,
+) -> str:
+    """Render TIF/SHP tool — renders a spatial raster or vector file to a PNG
+    image using the QGIS zoom_render renderer.
+
+    Args:
+        file_path: File Path
+    """
+    import importlib as _imp, sys as _sys, uuid as _uuid
+
+    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")
+    if _tools_dir and _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+
+    _params = {
+        "file_path": file_path,
+    }
+
+    _mod = _imp.import_module("render_tif")
+    _fn  = getattr(_mod, "run_render_tif")
+    _sid = _uuid.uuid4().hex[:8]
+    _tid = _uuid.uuid4().hex[:8]
+    _cb  = lambda pct, msg: logger.info("[%d%%] %s", pct, msg)
+
+    _start = time.time()
+    try:
+        _result = await _fn(_params, _sid, _tid, _cb)
+        _elapsed = round(time.time() - _start, 2)
+        return json.dumps({"status": "success", "model": "Render Tif", "elapsed_seconds": _elapsed, **_result}, indent=2, default=str)
+    except Exception as _e:
+        _elapsed = round(time.time() - _start, 2)
+        logger.error("%s failed: %s", "Render Tif", _e)
+        return json.dumps({"status": "error", "model": "Render Tif", "error": str(_e), "elapsed_seconds": _elapsed}, indent=2)
+
+
+# ====================================================================
+# Sediment Delivery Ratio
+# (auto-generated from sdr.py by nan_to_mcp.py)
+# ====================================================================
+@mcp.tool()
+def run_sdr(
+    dem_path: str,
+    erosivity_path: str,
+    erodibility_path: str,
+    lulc_path: str,
+    watersheds_path: str,
+    biophysical_table_path: str,
+    threshold_flow_accumulation: int,
+    k_param: int = 2,
+    sdr_max: float = 0.8,
+    ic_0_param: float = 0.5,
+    l_max: int = 122,
+    drainage_path: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """watersheds_path, biophysical_table_path, threshold_flow_accumulation,
+    k_param, sdr_max, ic_0_param, l_max.
+
+    Args:
+        dem_path: Path to Digital Elevation Model (DEM) raster
+        erosivity_path: Path to erosivity file
+        erodibility_path: Path to erodibility file
+        lulc_path: Path to land use/land cover raster
+        watersheds_path: Path to watersheds vector (shapefile or GeoPackage)
+        biophysical_table_path: Path to biophysical table CSV mapping LULC
+            codes to model parameters
+        threshold_flow_accumulation: Minimum flow accumulation to define a stream pixel
+        k_param: Optional int, default 2
+        sdr_max: Optional float, default 0.8
+        ic_0_param: Optional float, default 0.5
+        l_max: Optional int, default 122
+        drainage_path: Path to drainage file
+        workspace_dir: Output directory (auto-created if empty)
+        results_suffix: Suffix appended to all output filenames
+    """
+    import natcap.invest.sdr.sdr
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "sdr"))
+    args = {
+        "dem_path": dem_path,
+        "erosivity_path": erosivity_path,
+        "erodibility_path": erodibility_path,
+        "lulc_path": lulc_path,
+        "watersheds_path": watersheds_path,
+        "biophysical_table_path": biophysical_table_path,
+        "threshold_flow_accumulation": threshold_flow_accumulation,
+        "k_param": k_param,
+        "sdr_max": sdr_max,
+        "ic_0_param": ic_0_param,
+        "l_max": l_max,
+        "drainage_path": drainage_path,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Sediment Delivery Ratio", natcap.invest.sdr.sdr, args, ws)
+
+
+# ====================================================================
+# Urban Mental Health
+# (auto-generated from urban_mental_health.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_urban_mental_health(
+    lulc_raster_path: str,
+    lulc_attribute_table: str,
+    population_raster_path: str,
+    admin_boundaries_vector_path: str,
+    search_radius_mode: str = "",
+    decay_function: str = "gaussian",
+    urban_nature_demand: float = 250,
+    search_radius: int = 300,
+    population_group_radii_table: str = "",
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """The model estimates the impacts of nature exposure, and more specifically
+    residential greenness, on mental health. Residential nature exposure is
+    defined as the average NDVI within a distance of a residence that
+    benefits human mental health. The mental health model calculates the
+    preventable mental disorder cases at the pixel level, based on the
+    selected urban greening scenario.
+
+    Args:
+        lulc_raster_path: Path to land use/land cover raster
+        lulc_attribute_table: Path to LULC attribute CSV defining which
+            classes count as urban nature and their supply
+        population_raster_path: Path to population density raster
+            (optional; used for exposure index)
+        admin_boundaries_vector_path: Path to administrative boundaries
+            vector for result aggregation
+        search_radius_mode: Search radius strategy: 'uniform radius',
+            'radius per population group', or 'radius per urban nature
+            class'
+        decay_function: Distance decay function for nature access:
+            'exponential' or 'power'
+        urban_nature_demand: Optional float, default 250
+        search_radius: Distance used to define the surrounding area of a
+            person’s residence that best represents daily exposure to
+            nearby nature. Must be > 0.
+        population_group_radii_table: Path to CSV mapping population group
+            field names to search radii (required for 'radius per
+            population group' mode)
+        workspace_dir: A path to the directory that will write output,
+            intermediate, and other temporary files during calculation.
+        results_suffix: Appended to any output filename.
+    """
+    import natcap.invest.urban_nature_access
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "urban_mental_health"))
+    args = {
+        "lulc_raster_path": lulc_raster_path,
+        "lulc_attribute_table": lulc_attribute_table,
+        "population_raster_path": population_raster_path,
+        "admin_boundaries_vector_path": admin_boundaries_vector_path,
+        "search_radius_mode": search_radius_mode,
+        "decay_function": decay_function,
+        "urban_nature_demand": urban_nature_demand,
+        "search_radius": search_radius,
+        "population_group_radii_table": population_group_radii_table,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Urban Mental Health", natcap.invest.urban_nature_access, args, ws)
+
+
+# ====================================================================
+# Offshore Wind Energy
+# (auto-generated from wind_energy.py by nan_to_mcp.py)
+# ⚠ REVIEW: source has conditional param logic — verify args dict below
+# ====================================================================
+@mcp.tool()
+def run_offshore_wind_energy(
+    wind_data_path: str,
+    aoi_vector_path: str,
+    turbine_parameters_path: str,
+    number_of_turbines: int,
+    global_wind_parameters_path: str,
+    bathymetry_path: str = "",
+    land_polygon_vector_path: str = "",
+    min_depth: float = 3,
+    max_depth: float = 60,
+    min_distance: float = 0,
+    max_distance: float = 200000,
+    avg_grid_distance: float = 4,
+    valuation_container: bool = False,
+    workspace_dir: str = "",
+    results_suffix: str = "",
+) -> str:
+    """This module handles the execution of the wind energy model given the
+    following dictionary:
+
+    Args:
+        wind_data_path: Path to a CSV file with the following header
+            [‘LONG’,’LATI’,’LAM’, ‘K’, ‘REF’]. Each following row is a
+            location with at least the Longitude, Latitude, Scale (‘LAM’),
+            Shape (‘K’), and reference height (‘REF’) at which the data was
+            collected (required)
+        aoi_vector_path: A path to an OGR polygon vector that is projected
+            in linear units of meters. The polygon specifies the area of
+            interest for the wind data points. If limiting the wind farm
+            bins by distance, then the aoi should also cover a portion of
+            the land polygon that is of interest (required)
+        turbine_parameters_path: A path to a CSV file that holds the
+            turbines biophysical parameters as well as valuation parameters
+            (required)
+        number_of_turbines: An integer value for the number of machines for
+            the wind farm (required for valuation)
+        global_wind_parameters_path: A float for the average distance in
+            kilometers from a grid connection point to a land connection
+            point (required for valuation if grid connection points are not
+            provided)
+        bathymetry_path: A path to a GDAL raster that has the depth values
+            of the area of interest (required)
+        land_polygon_vector_path: A path to an OGR polygon vector that
+            provides a coastline for determining distances from wind farm
+            bins (required)
+        min_depth: A float value for the minimum depth for offshore wind
+            farm installation (meters) (required)
+        max_depth: A float value for the maximum depth for offshore wind
+            farm installation (meters) (required)
+        min_distance: A float value for the minimum distance from shore for
+            offshore wind farm installation (meters) (required)
+        max_distance: A float value for the maximum distance from shore for
+            offshore wind farm installation (meters) (required)
+        avg_grid_distance: A float for the average distance in kilometers
+            from a grid connection point to a land connection point
+            (required for valuation if grid connection points are not
+            provided)
+        valuation_container: Indicates whether model includes valuation
+        workspace_dir: A path to the output workspace folder (required)
+        results_suffix: A str to append to the end of the output files (optional)
+    """
+    import natcap.invest.wind_energy
+
+    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "offshore_wind_energy"))
+    args = {
+        "wind_data_path": wind_data_path,
+        "aoi_vector_path": aoi_vector_path,
+        "turbine_parameters_path": turbine_parameters_path,
+        "number_of_turbines": number_of_turbines,
+        "global_wind_parameters_path": global_wind_parameters_path,
+        "bathymetry_path": bathymetry_path,
+        "land_polygon_vector_path": land_polygon_vector_path,
+        "min_depth": min_depth,
+        "max_depth": max_depth,
+        "min_distance": min_distance,
+        "max_distance": max_distance,
+        "avg_grid_distance": avg_grid_distance,
+        "valuation_container": valuation_container,
+        "workspace_dir": ws,
+        "results_suffix": results_suffix,
+    }
+
+    return run_invest_model("Offshore Wind Energy", natcap.invest.wind_energy, args, ws)
 
 if __name__ == "__main__":
     main()

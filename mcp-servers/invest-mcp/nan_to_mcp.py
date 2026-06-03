@@ -100,10 +100,12 @@ ALREADY_IN_SERVER: set[str] = {
     "run_pollination",
     "run_habitat_risk_assessment",
     "run_recreation",
+    # tools added manually (non-InVEST)
+    "run_network_analysis",
 }
 
-# Non-InVEST utilities — converter emits a stub with a manual-review notice
-NON_INVEST_STUBS = {"render_tif", "read_file", "network_analysis"}
+# All tools are now auto-generated — custom non-InVEST tools get async wrappers.
+NON_INVEST_STUBS: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +355,7 @@ class ToolSpec:
     function_name: str       # e.g. "run_coastal_vulnerability"
     model_name: str          # e.g. "Coastal Vulnerability"
     output_subdir: str       # e.g. "coastal_vulnerability"
-    invest_module: str       # e.g. "natcap.invest.coastal_vulnerability"
+    invest_module: str       # e.g. "natcap.invest.coastal_vulnerability" (empty for custom tools)
     invest_execute: str      # e.g. "natcap.invest.coastal_vulnerability.execute"
     params: list[ToolParam]
     doc_summary: str         # first line of module docstring (after "Tool:")
@@ -361,6 +363,7 @@ class ToolSpec:
     doc_param_hints: dict[str, str]  # per-param hints from Optional: section
     source_file: str         # original filename for comments
     has_complex_logic: bool = False
+    is_custom_tool: bool = False   # True for non-InVEST tools (async wrapper pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +698,56 @@ def _extract_invest_args_dict(func_body: list, local_vars: dict) -> dict[str, To
     return params
 
 
+def _extract_all_params_from_body(func_body: list, required_keys: set[str]) -> dict[str, ToolParam]:
+    """For custom (non-InVEST) tools: extract params from the full function body.
+
+    Finds every ``params["key"]`` (required) and ``params.get("key", dflt)``
+    (optional) anywhere in the function, then cross-checks against REQUIRED_KEYS.
+    """
+    params: dict[str, ToolParam] = {}
+
+    for node in ast.walk(ast.Module(body=func_body, type_ignores=[])):
+        # params.get("key", default) — check before the subscript pattern
+        if _is_params_get(node):
+            key, default = _extract_params_get(node)
+            if not key or key in params:
+                continue
+            t = _infer_type(key, default)
+            if default is None:
+                default = "" if t == "str" else (False if t == "bool" else 0)
+            params[key] = ToolParam(name=key, type_hint=t, default=default, required=False)
+
+        # params["key"] — subscript access → required by default
+        elif _is_params_subscript(node):
+            key_node = node.slice
+            if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+                continue
+            key = key_node.value
+            if key in params:
+                continue
+            t = _infer_type(key, None)
+            params[key] = ToolParam(name=key, type_hint=t, default=None, required=True)
+
+    # Re-reconcile requiredness against REQUIRED_KEYS list:
+    # anything in REQUIRED_KEYS is definitely required;
+    # anything NOT in REQUIRED_KEYS (but was params["key"]) stays required
+    # only if REQUIRED_KEYS itself was empty (no explicit list defined).
+    if required_keys:
+        for key in list(params.keys()):
+            p = params[key]
+            should_be_req = key in required_keys
+            if should_be_req and not p.required:
+                params[key] = ToolParam(name=key, type_hint=p.type_hint,
+                                        default=None, required=True)
+            elif not should_be_req and p.required:
+                t = p.type_hint
+                params[key] = ToolParam(name=key, type_hint=t,
+                                        default="" if t == "str" else (False if t == "bool" else 0),
+                                        required=False)
+
+    return params
+
+
 def _find_async_run_function(tree: ast.Module) -> Optional[ast.AsyncFunctionDef]:
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith("run_"):
@@ -738,16 +791,16 @@ def parse_nan_tool(filepath: Path) -> Optional[ToolSpec]:
     fn_name = func_node.name
     invest_module, invest_execute = _extract_invest_module(tree)
     required_keys: set[str] = set(_extract_required_keys(tree))
-    local_vars = _collect_local_param_vars(func_node.body)
-    raw_params = _extract_invest_args_dict(func_node.body, local_vars)
 
-    # Promote any param whose key is in REQUIRED_KEYS (Nan's naming) to required
-    # We also promote params that were parsed as required from `params["key"]`
-    # (already handled in _extract_invest_args_dict).
-    # For key-renamed cases (scenic_quality: "aoi_path" ← params["aoi_vector_path"]),
-    # the invest key was used directly, so we need to re-check against REQUIRED_KEYS
-    # by checking if ANY required key maps to this invest key via the params subscript.
-    # This was already handled by the _is_params_subscript check.
+    is_custom = not bool(invest_module)
+
+    if is_custom:
+        # Non-InVEST tool: walk the whole function body for params["key"] /
+        # params.get() patterns instead of an invest_args dict.
+        raw_params = _extract_all_params_from_body(func_node.body, required_keys)
+    else:
+        local_vars = _collect_local_param_vars(func_node.body)
+        raw_params = _extract_invest_args_dict(func_node.body, local_vars)
 
     # Build ordered param list: required first, optional second
     required_list: list[ToolParam] = []
@@ -763,9 +816,14 @@ def parse_nan_tool(filepath: Path) -> Optional[ToolSpec]:
         else:
             optional_list.append(param)
 
-    # workspace_dir and results_suffix are always last
-    optional_list.append(ToolParam("workspace_dir", "str", "", required=False))
-    optional_list.append(ToolParam("results_suffix", "str", "", required=False))
+    if is_custom:
+        # Custom tools manage their own workspace via generate_output_dir();
+        # no workspace_dir / results_suffix params needed in the MCP signature.
+        pass
+    else:
+        # workspace_dir and results_suffix are always last for InVEST tools
+        optional_list.append(ToolParam("workspace_dir", "str", "", required=False))
+        optional_list.append(ToolParam("results_suffix", "str", "", required=False))
 
     # Detect complex logic that the converter couldn't fully capture
     has_complex = bool(
@@ -799,6 +857,7 @@ def parse_nan_tool(filepath: Path) -> Optional[ToolSpec]:
         doc_param_hints=doc_param_hints,
         source_file=filepath.name,
         has_complex_logic=has_complex,
+        is_custom_tool=is_custom,
     )
 
 
@@ -867,11 +926,124 @@ _MODEL_DESCRIPTIONS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Code generator
+# Code generator — custom (non-InVEST) async wrapper
+# ---------------------------------------------------------------------------
+
+def generate_custom_mcp_tool(spec: ToolSpec) -> str:
+    """Generate an async @mcp.tool() that delegates to Nan's tool module.
+
+    The generated function:
+      1. Inserts NAN_TOOLS_DIR into sys.path so Nan's module is importable.
+      2. Builds the params dict from flat MCP kwargs.
+      3. Imports and awaits Nan's async run_* function.
+      4. Returns a JSON status envelope.
+
+    The server's .env must define NAN_TOOLS_DIR pointing at Nan's tools/
+    directory and any config variables that shared/utils.py needs
+    (e.g. OUTPUT_BASE_DIR for generate_output_dir).
+    """
+    lines: list[str] = []
+
+    eq = "=" * 68
+    lines.append(f"# {eq}")
+    lines.append(f"# {spec.model_name}")
+    lines.append(f"# (auto-generated from {spec.source_file} by nan_to_mcp.py)")
+    lines.append(f"# {eq}")
+    lines.append("@mcp.tool()")
+
+    required_params = [p for p in spec.params if p.required]
+    optional_params = [p for p in spec.params if not p.required]
+
+    sig_parts: list[str] = []
+    for p in required_params:
+        sig_parts.append(f"    {p.name}: {p.type_hint}")
+    for p in optional_params:
+        dv = _default_repr(p.type_hint, p.default)
+        sig_parts.append(f"    {p.name}: {p.type_hint} = {dv}")
+
+    if sig_parts:
+        sig = "async def {}(\n{},\n) -> str:".format(
+            spec.function_name,
+            ",\n".join(sig_parts),
+        )
+    else:
+        sig = f"async def {spec.function_name}() -> str:"
+    lines.append(sig)
+
+    # Docstring
+    official = INVEST_DOCS.get(spec.function_name, {})
+    opening = (official.get("description", "").strip()
+                or spec.doc_description
+                or spec.doc_summary
+                or f"Run the {spec.model_name} tool.")
+    wrapped = textwrap.fill(opening, width=75, subsequent_indent="    ")
+    doc: list[str] = [f'    """{wrapped}', ""]
+    all_params = required_params + optional_params
+    if all_params:
+        doc.append("    Args:")
+        official_params: dict[str, str] = official.get("params", {})
+        for p in all_params:
+            if p.name in official_params:
+                desc = official_params[p.name]
+            elif p.name in _PARAM_DESCRIPTIONS:
+                desc = _PARAM_DESCRIPTIONS[p.name]
+            elif spec.doc_param_hints.get(p.name):
+                desc = spec.doc_param_hints[p.name]
+            else:
+                desc = p.name.replace("_", " ").title()
+            doc.append(f"        {p.name}: {desc}")
+    doc.append('    """')
+    lines.append("\n".join(doc))
+
+    # Module stem for import (strip .py from source_file)
+    stem = spec.source_file[:-3] if spec.source_file.endswith(".py") else spec.source_file
+
+    # Body
+    lines.append("    import importlib as _imp, sys as _sys, uuid as _uuid")
+    lines.append("")
+    lines.append('    _tools_dir = os.getenv("NAN_TOOLS_DIR", "")')
+    lines.append("    if _tools_dir and _tools_dir not in _sys.path:")
+    lines.append("        _sys.path.insert(0, _tools_dir)")
+    lines.append("")
+    # Build params dict — pass ALL args; Nan's tool ignores extra optional empty strings
+    lines.append("    _params = {")
+    for p in all_params:
+        lines.append(f'        "{p.name}": {p.name},')
+    lines.append("    }")
+    lines.append("")
+    lines.append(f'    _mod = _imp.import_module("{stem}")')
+    lines.append(f'    _fn  = getattr(_mod, "{spec.function_name}")')
+    lines.append("    _sid = _uuid.uuid4().hex[:8]")
+    lines.append("    _tid = _uuid.uuid4().hex[:8]")
+    lines.append("    _cb  = lambda pct, msg: logger.info(\"[%d%%] %s\", pct, msg)")
+    lines.append("")
+    lines.append("    _start = time.time()")
+    lines.append("    try:")
+    lines.append("        _result = await _fn(_params, _sid, _tid, _cb)")
+    lines.append("        _elapsed = round(time.time() - _start, 2)")
+    lines.append(
+        f'        return json.dumps({{"status": "success", "model": "{spec.model_name}",'
+        f' "elapsed_seconds": _elapsed, **_result}}, indent=2, default=str)'
+    )
+    lines.append("    except Exception as _e:")
+    lines.append("        _elapsed = round(time.time() - _start, 2)")
+    lines.append("        logger.error(\"%s failed: %s\", \"" + spec.model_name + "\", _e)")
+    lines.append(
+        f'        return json.dumps({{"status": "error", "model": "{spec.model_name}",'
+        f' "error": str(_e), "elapsed_seconds": _elapsed}}, indent=2)'
+    )
+
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Code generator — InVEST tools
 # ---------------------------------------------------------------------------
 
 def generate_mcp_tool(spec: ToolSpec) -> str:
     """Render a complete @mcp.tool() decorated function from a ToolSpec."""
+    if spec.is_custom_tool:
+        return generate_custom_mcp_tool(spec)
     lines: list[str] = []
 
     # Section header
@@ -1090,7 +1262,7 @@ def _server_signatures(path: Path) -> dict[str, tuple]:
     try:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name.startswith("run_"):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("run_"):
                 sigs[node.name] = _param_signature(node)
     except Exception:
         pass
@@ -1286,14 +1458,11 @@ def main() -> None:
             continue
 
         # --- generate the new tool code ---
-        if stem in NON_INVEST_STUBS:
-            block = generate_stub(filepath)
-        else:
-            spec = parse_nan_tool(filepath)
-            if spec is None:
-                failed.append(filepath.name)
-                continue
-            block = generate_mcp_tool(spec)
+        spec = parse_nan_tool(filepath)
+        if spec is None:
+            failed.append(filepath.name)
+            continue
+        block = generate_mcp_tool(spec)
 
         # --- sync mode: classify as new / changed / unchanged ---
         if args.sync:
@@ -1309,13 +1478,12 @@ def main() -> None:
                 print(f"  [+]{flag} {filepath.name} → appended", file=sys.stderr)
             else:
                 # Tool already exists — compare signatures
-                new_sig = _param_signature(ast.parse(block).body[0]
-                                           if len(ast.parse(block).body) == 1
-                                           else next(
-                                               n for n in ast.walk(ast.parse(block))
-                                               if isinstance(n, ast.FunctionDef)
-                                               and n.name == fn_name
-                                           ))
+                _parsed_block = ast.parse(block)
+                new_sig = _param_signature(next(
+                    n for n in ast.walk(_parsed_block)
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and n.name == fn_name
+                ))
                 old_sig = existing_sigs[fn_name]
 
                 if new_sig == old_sig:
@@ -1334,8 +1502,9 @@ def main() -> None:
 
         # --- append / output mode ---
         new_blocks.append(block)
-        flag = " ⚠ review" if getattr(locals().get('spec'), 'has_complex_logic', False) else ""
-        print(f"  [ok]{flag}     {filepath.name} → {fn_name}()", file=sys.stderr)
+        kind = "async/custom" if getattr(spec, "is_custom_tool", False) else "invest"
+        flag = " ⚠ review" if getattr(spec, "has_complex_logic", False) else ""
+        print(f"  [ok]{flag} [{kind}]  {filepath.name} → {fn_name}()", file=sys.stderr)
 
     if args.dry_run:
         if dry_run_changes == 0:
