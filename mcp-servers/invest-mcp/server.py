@@ -611,16 +611,19 @@ def run_seasonal_water_yield(
     aoi_path: str,
     biophysical_table_path: str,
     dem_raster_path: str,
-    et0_dir: str,
     lulc_raster_path: str,
-    precip_dir: str,
     rain_events_table_path: str,
     soil_group_path: str,
     threshold_flow_accumulation: int,
+    et0_raster_table: str = "",
+    precip_raster_table: str = "",
+    et0_dir: str = "",
+    precip_dir: str = "",
     workspace_dir: str = "",
     alpha_m: float = 0.08333,
     beta_i: float = 1.0,
     gamma: float = 1.0,
+    flow_dir_algorithm: str = "MFD",
     monthly_alpha: bool = False,
     monthly_alpha_path: str = "",
     user_defined_climate_zones: bool = False,
@@ -633,22 +636,29 @@ def run_seasonal_water_yield(
     """Run the InVEST Seasonal Water Yield model.
 
     Estimates seasonal water yield partitioned into quickflow and baseflow.
-    Requires monthly precipitation and ET0 raster directories.
+
+    Provide monthly rasters via CSV tables (et0_raster_table / precip_raster_table,
+    each with columns 'month' and 'path') OR via legacy directories (et0_dir /
+    precip_dir). The CSV-table form is required for InVEST >= 3.14; the directory
+    form is auto-converted to a table when a directory is supplied.
 
     Args:
         aoi_path: Path to area of interest vector
-        biophysical_table_path: Path to biophysical table CSV with curve numbers and Kc values
+        biophysical_table_path: Path to biophysical table CSV (lucode, CN_A-D, Kc_1-12)
         dem_raster_path: Path to Digital Elevation Model raster
-        et0_dir: Directory containing 12 monthly reference ET rasters
         lulc_raster_path: Path to land use/land cover raster
-        precip_dir: Directory containing 12 monthly precipitation rasters
-        rain_events_table_path: Path to rain events table CSV
-        soil_group_path: Path to soil hydrologic group raster
+        rain_events_table_path: Path to rain events table CSV (month, events)
+        soil_group_path: Path to soil hydrologic group raster (values 1-4 = A-D)
         threshold_flow_accumulation: Flow accumulation threshold for streams
+        et0_raster_table: CSV with columns 'month','path' for monthly ET0 rasters
+        precip_raster_table: CSV with columns 'month','path' for monthly precip rasters
+        et0_dir: Legacy: directory containing ET0_*.tif files named with month suffix
+        precip_dir: Legacy: directory containing precip_*.tif files named with month suffix
         workspace_dir: Output directory
         alpha_m: Fraction of upslope annual available recharge (default 1/12)
         beta_i: Fraction of subsurface recharge available to downslope (default 1.0)
         gamma: Fraction of pixel recharge available to stream (default 1.0)
+        flow_dir_algorithm: Flow direction algorithm, 'MFD' or 'D8' (default 'MFD')
         monthly_alpha: Use monthly alpha values from table (default False)
         monthly_alpha_path: Path to monthly alpha CSV (if monthly_alpha=True)
         user_defined_climate_zones: Use custom climate zones (default False)
@@ -658,16 +668,55 @@ def run_seasonal_water_yield(
         l_path: Path to local recharge raster (if user_defined_local_recharge)
         results_suffix: Suffix appended to output filenames
     """
+    import csv as _csv
+    import glob as _glob
     import natcap.invest.seasonal_water_yield.seasonal_water_yield
 
     ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "seasonal_water_yield"))
+
+    def _dir_to_table(directory, prefix, label):
+        """Auto-generate a month→path CSV from a raster directory."""
+        tifs = sorted(_glob.glob(os.path.join(directory, "*.tif")))
+        rows = []
+        for tif in tifs:
+            base = os.path.splitext(os.path.basename(tif))[0]
+            # extract trailing integer (month number)
+            digits = "".join(c for c in base if c.isdigit())
+            if digits:
+                rows.append((int(digits), tif))
+        if not rows:
+            raise ValueError(f"No .tif files found in {label} directory: {directory}")
+        rows.sort()
+        table_path = os.path.join(ws, f"{prefix}_raster_table_auto.csv")
+        with open(table_path, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["month", "path"])
+            w.writerows(rows)
+        return table_path
+
+    # Resolve et0 source
+    if clean_optional(et0_raster_table):
+        resolved_et0 = et0_raster_table
+    elif clean_optional(et0_dir):
+        resolved_et0 = _dir_to_table(et0_dir, "et0", "ET0")
+    else:
+        raise ValueError("Provide either et0_raster_table or et0_dir.")
+
+    # Resolve precip source
+    if clean_optional(precip_raster_table):
+        resolved_precip = precip_raster_table
+    elif clean_optional(precip_dir):
+        resolved_precip = _dir_to_table(precip_dir, "precip", "precipitation")
+    else:
+        raise ValueError("Provide either precip_raster_table or precip_dir.")
+
     args = {
         "aoi_path": aoi_path,
         "biophysical_table_path": biophysical_table_path,
         "dem_raster_path": dem_raster_path,
-        "et0_dir": et0_dir,
+        "et0_raster_table": resolved_et0,
+        "precip_raster_table": resolved_precip,
         "lulc_raster_path": lulc_raster_path,
-        "precip_dir": precip_dir,
         "rain_events_table_path": rain_events_table_path,
         "soil_group_path": soil_group_path,
         "threshold_flow_accumulation": threshold_flow_accumulation,
@@ -675,6 +724,7 @@ def run_seasonal_water_yield(
         "alpha_m": alpha_m,
         "beta_i": beta_i,
         "gamma": gamma,
+        "flow_dir_algorithm": flow_dir_algorithm,
         "monthly_alpha": monthly_alpha,
         "user_defined_climate_zones": user_defined_climate_zones,
         "user_defined_local_recharge": user_defined_local_recharge,
@@ -898,40 +948,115 @@ def run_carbon_storage(
 def run_crop_production_percentile(
     landcover_raster_path: str,
     landcover_to_crop_table_path: str,
-    model_data_path: str,
+    climate_bin_raster_table: str,
+    observed_yield_raster_table: str,
+    percentile_yield_csv_table: str,
+    crop_nutrient_table: str,
     workspace_dir: str = "",
+    model_data_path: str = "",
     aggregate_polygon_path: str = "",
     results_suffix: str = "",
 ) -> str:
     """Run the InVEST Crop Production Percentile model.
 
     Estimates crop yields using globally observed percentile yield datasets.
-    Provides 25th, 50th, 75th percentile production estimates.
+    Provides 25th, 50th, 75th, and 95th percentile production estimates.
+
+    InVEST >= 3.14 requires four explicit data tables instead of a single
+    model_data_path directory. Pass the four table paths directly, or supply
+    model_data_path (a directory with the standard InVEST sample-data layout)
+    and the tool will auto-generate the tables from it.
+
+    Auto-generated table layout expected inside model_data_path:
+      extended_climate_bin_maps/extendedclimatebins<crop>.tif
+      observed_yield/<crop>_yield_map.tif
+      climate_percentile_yield_tables/<crop>_percentile_yield_table.csv
+      crop_nutrient.csv  (index column must be 'crop_name'; auto-renamed if 'crop')
 
     Args:
-        landcover_raster_path: Path to land cover raster with crop codes
-        landcover_to_crop_table_path: Path to CSV mapping LULC codes to crop names
-        model_data_path: Path to directory containing InVEST global crop yield datasets
+        landcover_raster_path: Path to land cover raster with LULC codes
+        landcover_to_crop_table_path: CSV mapping LULC codes to crop names
+            (columns: crop_name, lucode)
+        climate_bin_raster_table: CSV with columns 'crop_name','path' mapping
+            each crop to its climate-bin raster
+        observed_yield_raster_table: CSV with columns 'crop_name','path' mapping
+            each crop to its observed-yield raster
+        percentile_yield_csv_table: CSV with columns 'crop_name','path' mapping
+            each crop to its percentile-yield table CSV
+        crop_nutrient_table: CSV of crop nutritional content (index col crop_name)
         workspace_dir: Output directory
-        aggregate_polygon_path: Path to polygon vector for aggregated summaries (optional)
+        model_data_path: Legacy: path to InVEST sample-data directory. When
+            supplied (and the four table args are empty), the four tables are
+            auto-generated for the crops listed in landcover_to_crop_table_path.
+        aggregate_polygon_path: Optional polygon vector for aggregated summaries
         results_suffix: Suffix appended to output filenames
     """
-    import natcap.invest.crop_production_percentile
+    import csv as _csv
+    import natcap.invest.crop_production_percentile.crop_production_percentile
 
     ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "crop_percentile"))
+
+    # ── Legacy model_data_path → auto-generate the four tables ──────────────
+    if clean_optional(model_data_path) and not (
+        clean_optional(climate_bin_raster_table)
+        and clean_optional(observed_yield_raster_table)
+        and clean_optional(percentile_yield_csv_table)
+        and clean_optional(crop_nutrient_table)
+    ):
+        # Read crop names from landcover_to_crop_table
+        with open(landcover_to_crop_table_path, newline="") as f:
+            crops = [row["crop_name"] for row in _csv.DictReader(f)]
+
+        def _write_table(fname, rows):
+            p = os.path.join(ws, fname)
+            with open(p, "w", newline="") as f:
+                w = _csv.writer(f)
+                w.writerow(["crop_name", "path"])
+                w.writerows(rows)
+            return p
+
+        climate_bin_raster_table = _write_table(
+            "climate_bin_raster_table_auto.csv",
+            [(c, os.path.join(model_data_path, "extended_climate_bin_maps",
+                              f"extendedclimatebins{c}.tif")) for c in crops],
+        )
+        observed_yield_raster_table = _write_table(
+            "observed_yield_raster_table_auto.csv",
+            [(c, os.path.join(model_data_path, "observed_yield",
+                              f"{c}_yield_map.tif")) for c in crops],
+        )
+        percentile_yield_csv_table = _write_table(
+            "percentile_yield_csv_table_auto.csv",
+            [(c, os.path.join(model_data_path, "climate_percentile_yield_tables",
+                              f"{c}_percentile_yield_table.csv")) for c in crops],
+        )
+        # Fix index column crop→crop_name if needed
+        raw_nutrient = os.path.join(model_data_path, "crop_nutrient.csv")
+        fixed_nutrient = os.path.join(ws, "crop_nutrient_fixed.csv")
+        with open(raw_nutrient, newline="") as fin, \
+             open(fixed_nutrient, "w", newline="") as fout:
+            content = fin.read()
+        with open(fixed_nutrient, "w") as fout:
+            fout.write(content.replace("crop,", "crop_name,", 1)
+                       if content.startswith("crop,") else content)
+        crop_nutrient_table = fixed_nutrient
+
     args = {
-        "landcover_raster_path": landcover_raster_path,
+        "landcover_raster_path":        landcover_raster_path,
         "landcover_to_crop_table_path": landcover_to_crop_table_path,
-        "model_data_path": model_data_path,
-        "workspace_dir": ws,
-        "results_suffix": results_suffix,
+        "climate_bin_raster_table":     climate_bin_raster_table,
+        "observed_yield_raster_table":  observed_yield_raster_table,
+        "percentile_yield_csv_table":   percentile_yield_csv_table,
+        "crop_nutrient_table":          crop_nutrient_table,
+        "workspace_dir":                ws,
+        "results_suffix":               results_suffix,
     }
     if clean_optional(aggregate_polygon_path):
         args["aggregate_polygon_path"] = aggregate_polygon_path
 
     return run_invest_model(
         "Crop Production Percentile",
-        natcap.invest.crop_production_percentile,
+        natcap.invest.crop_production_percentile.crop_production_percentile,
         args,
         ws,
     )
@@ -945,8 +1070,12 @@ def run_crop_production_regression(
     landcover_raster_path: str,
     landcover_to_crop_table_path: str,
     fertilization_rate_table_path: str,
-    model_data_path: str,
+    climate_bin_raster_table: str,
+    observed_yield_raster_table: str,
+    regression_yield_csv_table: str,
+    crop_nutrient_table: str,
     workspace_dir: str = "",
+    model_data_path: str = "",
     aggregate_polygon_path: str = "",
     results_suffix: str = "",
 ) -> str:
@@ -955,32 +1084,101 @@ def run_crop_production_regression(
     Estimates crop yields using regression models based on fertilizer
     application rates (nitrogen, phosphorus, potassium).
 
+    InVEST >= 3.14 requires four explicit data tables instead of a single
+    model_data_path directory. Pass the four table paths directly, or supply
+    model_data_path (a directory with the standard InVEST sample-data layout)
+    and the tool will auto-generate the tables from it.
+
+    Auto-generated table layout expected inside model_data_path:
+      extended_climate_bin_maps/extendedclimatebins<crop>.tif
+      observed_yield/<crop>_yield_map.tif
+      climate_regression_yield_tables/<crop>_regression_yield_table.csv
+      crop_nutrient.csv  (index column must be 'crop_name'; auto-renamed if 'crop')
+
     Args:
-        landcover_raster_path: Path to land cover raster with crop codes
-        landcover_to_crop_table_path: Path to CSV mapping LULC codes to crop names
-        fertilization_rate_table_path: Path to CSV with fertilization rates (N, P, K) per crop
-        model_data_path: Path to directory containing InVEST global crop model datasets
+        landcover_raster_path: Path to land cover raster with LULC codes
+        landcover_to_crop_table_path: CSV mapping LULC codes to crop names
+            (columns: crop_name, lucode)
+        fertilization_rate_table_path: CSV with per-crop N, P, K rates
+            (columns: crop_name, nitrogen_rate, phosphorus_rate, potassium_rate)
+        climate_bin_raster_table: CSV with columns 'crop_name','path' mapping
+            each crop to its climate-bin raster
+        observed_yield_raster_table: CSV with columns 'crop_name','path' mapping
+            each crop to its observed-yield raster
+        regression_yield_csv_table: CSV with columns 'crop_name','path' mapping
+            each crop to its regression-yield table CSV
+        crop_nutrient_table: CSV of crop nutritional content (index col crop_name)
         workspace_dir: Output directory
-        aggregate_polygon_path: Path to polygon vector for aggregated summaries (optional)
+        model_data_path: Legacy: path to InVEST sample-data directory. When
+            supplied (and the four table args are empty), the four tables are
+            auto-generated for the crops listed in landcover_to_crop_table_path.
+        aggregate_polygon_path: Optional polygon vector for aggregated summaries
         results_suffix: Suffix appended to output filenames
     """
-    import natcap.invest.crop_production_regression
+    import csv as _csv
+    import natcap.invest.crop_production_regression.crop_production_regression
 
     ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "crop_regression"))
+
+    # ── Legacy model_data_path → auto-generate the four tables ──────────────
+    if clean_optional(model_data_path) and not (
+        clean_optional(climate_bin_raster_table)
+        and clean_optional(observed_yield_raster_table)
+        and clean_optional(regression_yield_csv_table)
+        and clean_optional(crop_nutrient_table)
+    ):
+        with open(landcover_to_crop_table_path, newline="") as f:
+            crops = [row["crop_name"] for row in _csv.DictReader(f)]
+
+        def _write_table(fname, rows):
+            p = os.path.join(ws, fname)
+            with open(p, "w", newline="") as f:
+                w = _csv.writer(f)
+                w.writerow(["crop_name", "path"])
+                w.writerows(rows)
+            return p
+
+        climate_bin_raster_table = _write_table(
+            "climate_bin_raster_table_auto.csv",
+            [(c, os.path.join(model_data_path, "extended_climate_bin_maps",
+                              f"extendedclimatebins{c}.tif")) for c in crops],
+        )
+        observed_yield_raster_table = _write_table(
+            "observed_yield_raster_table_auto.csv",
+            [(c, os.path.join(model_data_path, "observed_yield",
+                              f"{c}_yield_map.tif")) for c in crops],
+        )
+        regression_yield_csv_table = _write_table(
+            "regression_yield_csv_table_auto.csv",
+            [(c, os.path.join(model_data_path, "climate_regression_yield_tables",
+                              f"{c}_regression_yield_table.csv")) for c in crops],
+        )
+        raw_nutrient = os.path.join(model_data_path, "crop_nutrient.csv")
+        fixed_nutrient = os.path.join(ws, "crop_nutrient_fixed.csv")
+        with open(raw_nutrient) as fin:
+            content = fin.read()
+        with open(fixed_nutrient, "w") as fout:
+            fout.write(content.replace("crop,", "crop_name,", 1)
+                       if content.startswith("crop,") else content)
+        crop_nutrient_table = fixed_nutrient
+
     args = {
-        "landcover_raster_path": landcover_raster_path,
-        "landcover_to_crop_table_path": landcover_to_crop_table_path,
+        "landcover_raster_path":         landcover_raster_path,
+        "landcover_to_crop_table_path":  landcover_to_crop_table_path,
         "fertilization_rate_table_path": fertilization_rate_table_path,
-        "model_data_path": model_data_path,
-        "workspace_dir": ws,
-        "results_suffix": results_suffix,
+        "climate_bin_raster_table":      climate_bin_raster_table,
+        "observed_yield_raster_table":   observed_yield_raster_table,
+        "regression_yield_csv_table":    regression_yield_csv_table,
+        "crop_nutrient_table":           crop_nutrient_table,
+        "workspace_dir":                 ws,
+        "results_suffix":                results_suffix,
     }
     if clean_optional(aggregate_polygon_path):
         args["aggregate_polygon_path"] = aggregate_polygon_path
 
     return run_invest_model(
         "Crop Production Regression",
-        natcap.invest.crop_production_regression,
+        natcap.invest.crop_production_regression.crop_production_regression,
         args,
         ws,
     )
@@ -3472,96 +3670,6 @@ def run_urban_mental_health(
 
     return run_invest_model("Urban Mental Health", natcap.invest.urban_nature_access, args, ws)
 
-
-# ====================================================================
-# Offshore Wind Energy
-# (auto-generated from wind_energy.py by nan_to_mcp.py)
-# ⚠ REVIEW: source has conditional param logic — verify args dict below
-# ====================================================================
-@mcp.tool()
-def run_offshore_wind_energy(
-    wind_data_path: str,
-    aoi_vector_path: str,
-    turbine_parameters_path: str,
-    number_of_turbines: int,
-    global_wind_parameters_path: str,
-    bathymetry_path: str = "",
-    land_polygon_vector_path: str = "",
-    min_depth: float = 3,
-    max_depth: float = 60,
-    min_distance: float = 0,
-    max_distance: float = 200000,
-    avg_grid_distance: float = 4,
-    valuation_container: bool = False,
-    workspace_dir: str = "",
-    results_suffix: str = "",
-) -> str:
-    """This module handles the execution of the wind energy model given the
-    following dictionary:
-
-    Args:
-        wind_data_path: Path to a CSV file with the following header
-            [‘LONG’,’LATI’,’LAM’, ‘K’, ‘REF’]. Each following row is a
-            location with at least the Longitude, Latitude, Scale (‘LAM’),
-            Shape (‘K’), and reference height (‘REF’) at which the data was
-            collected (required)
-        aoi_vector_path: A path to an OGR polygon vector that is projected
-            in linear units of meters. The polygon specifies the area of
-            interest for the wind data points. If limiting the wind farm
-            bins by distance, then the aoi should also cover a portion of
-            the land polygon that is of interest (required)
-        turbine_parameters_path: A path to a CSV file that holds the
-            turbines biophysical parameters as well as valuation parameters
-            (required)
-        number_of_turbines: An integer value for the number of machines for
-            the wind farm (required for valuation)
-        global_wind_parameters_path: A float for the average distance in
-            kilometers from a grid connection point to a land connection
-            point (required for valuation if grid connection points are not
-            provided)
-        bathymetry_path: A path to a GDAL raster that has the depth values
-            of the area of interest (required)
-        land_polygon_vector_path: A path to an OGR polygon vector that
-            provides a coastline for determining distances from wind farm
-            bins (required)
-        min_depth: A float value for the minimum depth for offshore wind
-            farm installation (meters) (required)
-        max_depth: A float value for the maximum depth for offshore wind
-            farm installation (meters) (required)
-        min_distance: A float value for the minimum distance from shore for
-            offshore wind farm installation (meters) (required)
-        max_distance: A float value for the maximum distance from shore for
-            offshore wind farm installation (meters) (required)
-        avg_grid_distance: A float for the average distance in kilometers
-            from a grid connection point to a land connection point
-            (required for valuation if grid connection points are not
-            provided)
-        valuation_container: Indicates whether model includes valuation
-        workspace_dir: A path to the output workspace folder (required)
-        results_suffix: A str to append to the end of the output files (optional)
-    """
-    import natcap.invest.wind_energy
-
-    ws = ensure_workspace(workspace_dir, os.path.join(OUTPUT_DIR, "offshore_wind_energy"))
-    args = {
-        "wind_data_path": wind_data_path,
-        "aoi_vector_path": aoi_vector_path,
-        "turbine_parameters_path": turbine_parameters_path,
-        "number_of_turbines": number_of_turbines,
-        "global_wind_parameters_path": global_wind_parameters_path,
-        "bathymetry_path": bathymetry_path,
-        "land_polygon_vector_path": land_polygon_vector_path,
-        "min_depth": min_depth,
-        "max_depth": max_depth,
-        "min_distance": min_distance,
-        "max_distance": max_distance,
-        "avg_grid_distance": avg_grid_distance,
-        "valuation_container": valuation_container,
-        "workspace_dir": ws,
-        "results_suffix": results_suffix,
-    }
-
-    return run_invest_model("Offshore Wind Energy", natcap.invest.wind_energy, args, ws)
 
 if __name__ == "__main__":
     main()
