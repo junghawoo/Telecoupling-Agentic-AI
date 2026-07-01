@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "invest-mcp": {
+      "command": "/Users/junghawoo/anaconda3/envs/telecoupling/bin/python",
+      "args": [
+        "/Users/junghawoo/Documents/github/Telecoupling-Agentic-AI/mcp-servers/invest-mcp/server.py",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "INVEST_OUTPUT_DIR": "/Users/junghawoo/Documents/github/Telecoupling-Agentic-AI/data/outputs",
+        "INVEST_SAMPLE_DATA_DIR": "/Users/junghawoo/Documents/github/Telecoupling-Agentic-AI/data/sample-inputs"
+      }
+    }
+  }
+}
